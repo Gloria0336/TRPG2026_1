@@ -1,0 +1,33 @@
+[project]
+name = "ai-living-world-mvp"
+version = "0.1.0"
+description = "AI Living World — 極簡化 MVP: standard D&D 5e, 2-player, short scenario, Discord bot + read-only web dashboard, no database."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.4",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "sse-starlette>=2.1",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
