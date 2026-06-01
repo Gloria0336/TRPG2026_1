@@ -4,7 +4,7 @@ from __future__ import annotations
 import discord
 
 from ..content import scenario
-from ..engine.types import Character, ResolutionResult
+from ..engine.types import Character, ResolutionResult, ResultBand
 from ..state.game_state import GameState
 from . import i18n
 
@@ -12,6 +12,8 @@ GREEN = discord.Color.green()
 RED = discord.Color.red()
 BLURPLE = discord.Color.blurple()
 GOLD = discord.Color.gold()
+# PARTIAL band sits between clean success (green) and outright failure (red).
+AMBER = discord.Color.orange()
 
 
 def intro_embed() -> discord.Embed:
@@ -89,7 +91,9 @@ def roll_prompt_embed(actor: Character, label: str, dc: int | None) -> discord.E
 
 
 def result_embed(result: ResolutionResult, narration: str | None = None) -> discord.Embed:
-    if result.success is True:
+    if result.band is ResultBand.PARTIAL:
+        color = AMBER
+    elif result.success is True:
         color = GREEN
     elif result.success is False:
         color = RED

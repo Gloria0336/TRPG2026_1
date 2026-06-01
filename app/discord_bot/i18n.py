@@ -141,6 +141,7 @@ def text(value: str | None) -> str:
         "Examine something": "仔細檢查某樣東西",
         "Move on": "繼續前進",
         "SUCCESS": "成功",
+        "PARTIAL": "部分成功",
         "FAILURE": "失敗",
         "HIT": "命中",
         "MISS": "未命中",

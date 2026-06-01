@@ -101,6 +101,16 @@ def roll_dice(count: int, sides: int, bonus: int = 0, *, crit: bool = False) -> 
     return DiceRoll(notation=notation, rolls=rolls, bonus=bonus, total=max(0, total))
 
 
+def choice(seq):
+    """Pick one element from `seq` using the shared seeded RNG.
+
+    Lives in dice.py so every non-deterministic engine decision (rolls, cost picks)
+    flows through the same seedable stream — important for repeatable tests and for
+    the design promise that the program owns all randomness (§4.0).
+    """
+    return _rng.choice(list(seq))
+
+
 def parse_and_roll(notation: str) -> DiceRoll:
     """Roll a simple 'NdM+K' / 'NdM-K' / 'dM' / 'NdM' string. Used by /roll."""
     import re

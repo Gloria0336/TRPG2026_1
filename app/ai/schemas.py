@@ -57,6 +57,6 @@ INTENT_JSON_SHAPE = (
     '  "candidates": [2-4 concrete method options]   // tier B only,\n'
     '  "question": one short clarifying question | null  // tier C only,\n'
     '  "options": [2-4 option labels]                 // tier C only,\n'
-    '  "suggested_dc": 5|10|15|20|25|30 | null        // only for unusual off-table actions\n'
+    '  "suggested_dc": 5|10|15|20|25|30|35 | null     // only for unusual off-table actions\n'
     '}'
 )

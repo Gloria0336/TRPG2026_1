@@ -491,3 +491,52 @@ options
 00:24:26.002 [INFO ] trpg.ai                | health: online (382 ms)
 00:24:42.050 [DEBUG] trpg.ai                | health: GET https://openrouter.ai/api/v1/models
 00:24:42.206 [INFO ] trpg.ai                | health: online (155 ms)
+01:58:37.342 [INFO ] trpg                   | logger initialized — trace file: C:\Users\User\Desktop\ST\TRPG2026_1\logs\trace.log
+01:58:37.543 [INFO ] trpg.ai                | interpret() actor=pc_bram text='I attack the goblin with my sword' scene=tavern
+01:58:37.543 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.543 [INFO ] trpg.ai                | interpret: AI disabled, using offline parser
+01:58:37.543 [INFO ] trpg.ai                | interpret: offline parse → tier=A action=attack target=None approach=None is_attack=True
+01:58:37.545 [INFO ] trpg.ai                | interpret() actor=pc_lyra text='I try to persuade Old Perrin' scene=tavern
+01:58:37.545 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.545 [INFO ] trpg.ai                | interpret: AI disabled, using offline parser
+01:58:37.545 [INFO ] trpg.ai                | interpret: offline parse → tier=A action=persuasion target=None approach=persuasion is_attack=False
+01:58:37.546 [INFO ] trpg.ai                | interpret() actor=pc_bram text='hmm uncertain stuff' scene=tavern
+01:58:37.546 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.546 [INFO ] trpg.ai                | interpret: AI disabled, using offline parser
+01:58:37.547 [INFO ] trpg.ai                | interpret: offline parse → tier=B action=None target=None approach=None is_attack=False
+01:58:37.548 [INFO ] trpg.ai                | narrate() kind=ResultKind.ATTACK actor=Bram Ironwood summary=Bram Ironwood attacks Goblin 1 with Longsword: HIT for 4 damage
+01:58:37.548 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.548 [INFO ] trpg.ai                | narrate: AI disabled, using canned narration
+01:58:37.548 [INFO ] trpg.ai                | narrate: canned narration (47 chars)
+01:58:37.548 [DEBUG] trpg.ai                | narrate: canned=攻擊紮實命中，場面俐落有力。 Goblin 1 takes 4 damage (7→3 HP)
+01:58:37.550 [INFO ] trpg.ai                | narrate() kind=ResultKind.CHECK actor=Bram Ironwood summary=Perception check vs DC 15: FAILURE (fumble!)
+01:58:37.550 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.550 [INFO ] trpg.ai                | narrate: AI disabled, using canned narration
+01:58:37.550 [INFO ] trpg.ai                | narrate: canned narration (16 chars)
+01:58:37.550 [DEBUG] trpg.ai                | narrate: canned=事情突然變糟，出現了麻煩的意外。
+01:58:37.553 [INFO ] trpg.ai                | interpret() actor=pc_bram text='hmm uncertain stuff' scene=tavern
+01:58:37.553 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.553 [INFO ] trpg.ai                | interpret: AI disabled, using offline parser
+01:58:37.553 [INFO ] trpg.ai                | interpret: offline parse → tier=B action=None target=None approach=None is_attack=False
+01:58:37.553 [INFO ] trpg.ai                | interpret() actor=pc_bram text='hmm' scene=tavern
+01:58:37.553 [WARNING] trpg.ai                | AI disabled — ai_offline=True has_key=True
+01:58:37.553 [INFO ] trpg.ai                | interpret: AI disabled, using offline parser
+01:58:37.554 [INFO ] trpg.ai                | interpret: offline parse → tier=C action=None target=None approach=None is_attack=False
+01:58:37.569 [DEBUG] trpg.resolution        | determine_dc: matched scene challenge key=persuasion → DC 13
+01:58:37.569 [INFO ] trpg.resolution        | resolve: actor=Lyra Dawnbringer skill=persuasion dc=13 adv=False disadv=False
+01:58:37.569 [INFO ] trpg.resolution        | resolve: result success=True roll=d20(14) + 3 = 17 summary=Persuasion check vs DC 13: SUCCESS target=Old Perrin
+01:58:37.570 [DEBUG] trpg.resolution        | determine_dc: matched scene challenge key=persuasion → DC 13
+01:58:37.570 [DEBUG] trpg.resolution        | determine_dc: snapped AI-proposed 14 → DC 15
+01:58:37.572 [DEBUG] trpg.resolution        | determine_dc: defaulting to DC 12 (no scene match, no AI proposal)
+01:58:37.572 [INFO ] trpg.resolution        | resolve: actor=Bram Ironwood skill=investigation dc=12 adv=False disadv=False
+01:58:37.572 [INFO ] trpg.resolution        | resolve: result success=True roll=d20(14) + 0 = 14 summary=Investigation check vs DC 12: SUCCESS target=None
+01:58:37.638 [DEBUG] trpg.ai                | health: GET https://openrouter.ai/api/v1/models
+01:58:38.032 [INFO ] trpg.ai                | health: online (394 ms)
+01:58:50.279 [INFO ] trpg                   | logger initialized — trace file: C:\Users\User\Desktop\ST\TRPG2026_1\logs\trace.log
+01:59:45.327 [INFO ] trpg                   | logger initialized — trace file: C:\Users\User\Desktop\ST\TRPG2026_1\logs\trace.log
+01:59:45.329 [DEBUG] trpg.resolution        | determine_dc: matched scene challenge key=persuasion → DC 13
+01:59:45.329 [INFO ] trpg.resolution        | resolve: actor=Bram Ironwood skill=persuasion dc=13 adv=False disadv=False
+01:59:45.330 [INFO ] trpg.resolution        | resolve: result success=True roll=d20(18) + 0 = 18 summary=Persuasion check vs DC 13: SUCCESS target=老佩林
+01:59:45.339 [DEBUG] trpg.resolution        | determine_dc: matched scene challenge key=intimidation → DC 15
+01:59:45.339 [INFO ] trpg.resolution        | resolve: actor=Bram Ironwood skill=intimidation dc=15 adv=False disadv=False
+01:59:45.339 [INFO ] trpg.resolution        | resolve: result success=True roll=d20(15) + 2 = 17 summary=Intimidation check vs DC 15: SUCCESS target=老佩林

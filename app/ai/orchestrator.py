@@ -20,7 +20,7 @@ from ..engine.resolution import APPROACH_SYNONYMS, normalize_approach
 from ..engine.types import Character, Intent, IntentTier, ResolutionResult, SKILLS
 from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
-from . import prompts
+from . import guard, prompts
 from .schemas import IntentParse
 
 log = get_logger("ai")
@@ -288,15 +288,43 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
              getattr(result, "kind", "?"), result.actor_name, truncate(result.summary, 200))
     if _ai_enabled():
         try:
+            base_user = prompts.narrate_context(state, result)
             prose = await _chat(
                 settings.model_narrate,
                 prompts.NARRATE_SYSTEM,
-                prompts.narrate_context(state, result),
+                base_user,
                 max_tokens=200,
             )
             log.info("narrate: AI narration OK (%d chars)", len(prose))
             log.debug("narrate: prose=%s", truncate(prose, 500))
-            return prose
+
+            # §8.0 guard: enforce "AI never touches numbers" at the engine boundary.
+            # On violation, give the model one strict-reminder retry before bailing.
+            violations = guard.find_violations(prose, result)
+            if violations:
+                log.warning("narrate: guard caught violations on first reply: %s",
+                            "; ".join(violations))
+                retry_user = base_user + "\n\n" + guard.violation_reminder(violations)
+                try:
+                    retry = await _chat(
+                        settings.model_narrate,
+                        prompts.NARRATE_SYSTEM,
+                        retry_user,
+                        max_tokens=200,
+                    )
+                    log.info("narrate: AI narration retry OK (%d chars)", len(retry))
+                    log.debug("narrate: retry prose=%s", truncate(retry, 500))
+                    retry_violations = guard.find_violations(retry, result)
+                    if not retry_violations:
+                        return retry
+                    log.error("narrate: guard rejected retry too (%s) — using canned",
+                              "; ".join(retry_violations))
+                except Exception as exc:
+                    log.error("narrate: retry failed (%s: %s) — using canned",
+                              type(exc).__name__, exc, exc_info=True)
+                # Fall through to canned narration when retry also fails the guard.
+            else:
+                return prose
         except httpx.HTTPStatusError as exc:
             log.warning("narrate: AI HTTP %s — using canned narration. body=%s",
                         exc.response.status_code, truncate(exc.response.text, 600))

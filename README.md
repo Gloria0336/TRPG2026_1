@@ -84,6 +84,28 @@ MODEL_NARRATE=anthropic/claude-sonnet-4.5  # 強模型：敘事
 
 ---
 
+## 安裝（第一次下載）
+
+如果是第一次下載或 clone 這個專案，請先進入專案資料夾、建立虛擬環境，並安裝相依套件：
+
+```powershell
+cd TRPG2026_1
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+若要執行測試，請改用開發安裝：
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+安裝完成後，確認已依照上方「設定環境變數」建立 `.env`，再執行下一節的啟動指令。
+
+---
+
 ## 執行
 
 ```powershell

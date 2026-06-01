@@ -32,7 +32,8 @@ def test_skill_and_save_bonuses():
 def test_nearest_anchor():
     assert rules_5e.nearest_anchor(13) == 15
     assert rules_5e.nearest_anchor(11) == 10
-    assert rules_5e.nearest_anchor(99) == 30
+    # §4.3 ladder tops out at 35 (Legendary) now.
+    assert rules_5e.nearest_anchor(99) == 35
 
 
 def test_apply_damage_downs_pc():

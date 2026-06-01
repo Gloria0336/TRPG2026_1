@@ -13,7 +13,7 @@ import uvicorn
 
 from .ai import orchestrator
 from .config import settings
-from .logging_setup import get_logger, setup_logging
+from .logging_setup import close_logging, get_logger, setup_logging
 
 setup_logging()
 log = get_logger("run")
@@ -67,4 +67,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        log.info("shutdown requested by Ctrl+C")
         print("\n[run] shutting down.")
+    finally:
+        close_logging()

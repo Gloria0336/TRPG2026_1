@@ -28,8 +28,8 @@ concrete `candidates` (e.g. for "get inside": ["pick the lock", "climb the wall"
 
 `approach` must be one of these 5e skills when applicable: {", ".join(ALLOWED_SKILLS)}.
 Set `is_attack` true ONLY if the player is trying to physically attack/fight someone.
-Only set `suggested_dc` (one of 5/10/15/20/25/30) for unusual actions not covered by the \
-scene; otherwise leave it null and let the program decide.
+Only set `suggested_dc` (one of 5/10/15/20/25/30/35) for unusual actions not covered \
+by the scene; otherwise leave it null and let the program decide.
 Write all player-facing `question`, `candidates`, and `options` in Traditional Chinese.
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):
@@ -54,35 +54,72 @@ def intent_context(state: "GameState", actor: "Character", text: str) -> str:
 # ───────────────────────── Narrator (GM voice) ─────────────────────────
 NARRATE_SYSTEM = """You are the GAME MASTER narrator for a Dungeons & Dragons 5e session. \
 You will be given a STRUCTURED RESULT that the game engine has already computed (dice, \
-hits, damage, success/failure). Your job is to dramatize it in vivid, concise prose.
+hits, damage, band, cost). Your job is to dramatize it in vivid, concise prose.
 
 ABSOLUTE RULES:
 - Write ONLY in Traditional Chinese.
-- Never contradict or change any number, hit/miss, success/failure, or HP in the result.
+- Never contradict or change any number, hit/miss, success/failure, band, cost, or HP \
+in the result.
 - Never invent new mechanical outcomes (no extra damage, no new enemies dying, no loot \
 unless stated).
+- If the result has a `band` of PARTIAL: the action DID succeed — narrate the goal as \
+achieved, then weave the given cost (e.g. exposure / time / relation) into the same \
+moment as a complication. Do not flip it into a failure.
+- If a `cost` is provided, the TYPE and SEVERITY come from the engine — honour both. \
+You may colour the cost with sensory detail, but you may not switch its category or \
+add a different cost.
 - Keep it to 1-3 sentences. Be evocative but tight. Address the table naturally.
 - Do not mention dice, DCs, or modifiers explicitly unless it adds flavor; describe the \
 fiction, not the math."""
 
 
+def _event_line(e) -> str:
+    """Format one past event as `- <actor> → <target>: <summary>` so the narrator
+    can see who acted on whom in history (otherwise it has to guess and tends to
+    fixate on the most dramatic NPC in the scene)."""
+    actor = e.actor_name
+    target = (e.data or {}).get("target_name") if hasattr(e, "data") else None
+    head = f"{actor} → {target}" if target else actor
+    return f"- {head}: {e.summary}"
+
+
 def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     window = settings.narrate_context_window
     recent = state.event_log[-window:-1] if len(state.event_log) > 1 else []
-    history = "\n".join(f"- {e.summary}" for e in recent) or "- (scene just beginning)"
+    history = "\n".join(_event_line(e) for e in recent) or "- (scene just beginning)"
     parts = [
         f"SCENE: {state.scene.title} — {state.scene.summary}",
         f"RECENT EVENTS:\n{history}",
         "STRUCTURED RESULT (do not alter any of this):",
-        f"  {result.summary}",
+        f"  actor: {result.actor_name}",
     ]
+    # Critical: without target the model can't tell who the action is aimed at and
+    # picks a random NPC from the scene description.
+    if result.target_name:
+        parts.append(f"  target: {result.target_name}")
+    # The player's original utterance is the strongest signal of intent — pass it
+    # verbatim so the narrator stays on the right beat (商人 vs 兜帽客 etc.).
+    if result.raw_text:
+        parts.append(f"  player said (verbatim, do not translate or invent): \"{result.raw_text}\"")
+    parts.append(f"  mechanical summary: {result.summary}")
+    if result.band:
+        parts.append(f"  band: {result.band.value} (SUCCESS=clean, PARTIAL=succeeded with cost, FAILURE=did not achieve)")
+    if result.cost:
+        parts.append(
+            f"  cost: type={result.cost.type.value}, severity={result.cost.severity.value}"
+            + (f" — {result.cost.note}" if result.cost.note else "")
+        )
     if result.roll_breakdown:
         parts.append(f"  roll: {result.roll_breakdown}")
     if result.deltas:
         parts.append("  state changes: " + "; ".join(result.deltas))
     if result.narration_hint:
         parts.append(f"  tone hint: {result.narration_hint}")
-    parts.append("\nWrite the narration now in Traditional Chinese (1-3 sentences):")
+    parts.append(
+        "\nWrite the narration now in Traditional Chinese (1-3 sentences). "
+        "The actor MUST be the one named above; if a target is given, the action MUST be "
+        "directed at that target — do not substitute a different NPC from the scene."
+    )
     return "\n".join(parts)
 
 

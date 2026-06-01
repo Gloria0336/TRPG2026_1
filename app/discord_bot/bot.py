@@ -229,9 +229,37 @@ async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
     if intent.target:
         label += f"：{i18n.text(intent.target)}"
 
+    # §4.9 helper opt-in: only offered when the OTHER PC is proficient in this skill
+    # (an untrained helper grants +0 — UX hides the button to avoid false hope).
+    helper_user_id: int | None = None
+    helper_pc_id: str | None = None
+    for other_pc in gs.pcs():
+        if other_pc.id == pc.id:
+            continue
+        if other_pc.skill_prof.get(skill) not in ("prof", "expertise"):
+            continue
+        claim = gs.claim_for_pc(other_pc.id)
+        if not claim:
+            continue
+        try:
+            helper_user_id = int(claim["user_id"])
+        except (TypeError, ValueError):
+            helper_user_id = None
+        if helper_user_id is not None:
+            helper_pc_id = other_pc.id
+            break
+
+    view = RollView(
+        user.id,
+        on_roll=None,  # set after the view exists so the closure can capture it
+        helper_user_id=helper_user_id,
+        helper_pc_id=helper_pc_id,
+        helper_label=f"我來協助 (+2)",
+    )
+
     async def on_roll(interaction: discord.Interaction):
-        log.info("_begin_check.on_roll: pc=%s rolling check", pc.name)
-        result = resolution.resolve(gs, intent, proposed_dc=proposed_dc)
+        log.info("_begin_check.on_roll: pc=%s helpers=%s rolling check", pc.name, view.helpers)
+        result = resolution.resolve(gs, intent, proposed_dc=proposed_dc, helpers=list(view.helpers))
         await interaction.response.edit_message(embed=embeds.result_embed(result), view=None)
         prose = await _narrate_into_log(gs, result)
         await interaction.edit_original_response(embed=embeds.result_embed(result, prose))
@@ -240,9 +268,11 @@ async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
         await _maybe_resolve_climax(channel, gs, result)
         await _send_freeplay_turn_prompt(channel, gs)
 
+    view.on_roll = on_roll
+
     gs.begin_freeplay_action(pc.id)
     await _persist(gs)
-    await channel.send(embed=embeds.roll_prompt_embed(pc, label, dc), view=RollView(user.id, on_roll))
+    await channel.send(embed=embeds.roll_prompt_embed(pc, label, dc), view=view)
 
 
 async def _begin_scene_combat(channel, gs) -> None:

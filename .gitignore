@@ -15,6 +15,9 @@ env/
 # Save snapshots / runtime state (the app re-creates save/ on launch)
 save/
 
+# Runtime logs
+logs/trace_*.log
+
 # Editor / OS
 .vscode/
 .idea/

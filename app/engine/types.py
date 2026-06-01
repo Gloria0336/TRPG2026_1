@@ -249,6 +249,73 @@ class ResultKind(str, Enum):
     NARRATIVE = "narrative"   # no roll; pure scene/utility beat
 
 
+class ResultBand(str, Enum):
+    """Three-band outcome for ability checks (design §4.4).
+
+    Margin vs DC slices the outcome instead of a pure pass/fail:
+    - SUCCESS: total ≥ DC (and not downgraded by a nat 1)
+    - PARTIAL: failed by 1-4 — the goal IS achieved, but a structured cost attaches
+    - FAILURE: failed by 5+
+    Nat 20 shifts the band up one step, nat 1 shifts it down (capped at the ends).
+    """
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILURE = "failure"
+
+
+class CostType(str, Enum):
+    """Structured cost categories (design §4.7). The engine picks the type from the
+    scene's cost pool or a default skill-based fallback; the narrator turns it into
+    fiction but never invents which type applied."""
+
+    TIME = "time"             # 時間流逝
+    EXPOSURE = "exposure"     # 行蹤暴露
+    RESOURCE = "resource"     # 資源損耗
+    TRACE = "trace"           # 留下痕跡
+    ATTENTION = "attention"   # 引來注意
+    RELATION = "relation"     # 關係惡化
+    DEBT = "debt"             # 延遲後果（債務式）
+
+
+class CostSeverity(str, Enum):
+    LIGHT = "light"
+    MODERATE = "moderate"
+    HEAVY = "heavy"
+
+
+@dataclass
+class Cost:
+    """A single structured cost attached to a PARTIAL or FAILURE result (design §4.7).
+
+    `persistent` marks costs that should flow into durable state (flags, hp, resources)
+    rather than living only in the narration. Out-of-combat MVP scope keeps most costs
+    non-persistent until we wire scene-state effects in a later pass.
+    """
+
+    type: CostType
+    severity: CostSeverity
+    persistent: bool = False
+    note: str = ""   # short program-generated tag; narrator elaborates, never overrides
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "severity": self.severity.value,
+            "persistent": self.persistent,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Cost":
+        return cls(
+            type=CostType(d["type"]),
+            severity=CostSeverity(d["severity"]),
+            persistent=bool(d.get("persistent", False)),
+            note=str(d.get("note", "")),
+        )
+
+
 @dataclass
 class ResolutionResult:
     """Structured outcome computed entirely by the engine. The AI turns this into
@@ -258,7 +325,11 @@ class ResolutionResult:
     actor_id: str
     actor_name: str
     summary: str                       # terse mechanical summary, e.g. "Athletics check vs DC 15: SUCCESS"
+    # `success` is the boolean back-compat view: PARTIAL counts as success-with-cost
+    # (design §4.4: 部分成功＝成功，但附枚舉代價). FAILURE → False, NARRATIVE → None.
     success: bool | None = None
+    band: ResultBand | None = None    # three-band outcome for CHECK results (§4.4)
+    cost: Cost | None = None          # attached when band is PARTIAL or FAILURE (§4.7)
     target_id: str | None = None
     target_name: str | None = None
     dc: int | None = None
@@ -271,10 +342,16 @@ class ResolutionResult:
     deltas: list[str] = field(default_factory=list)   # plain-language state changes applied
     # Hint to the narrator (style/tone), NOT a number it may alter.
     narration_hint: str = ""
+    # The player's original natural-language utterance, carried through so the narrator
+    # knows who/what the actor was actually addressing (combat fills this from the
+    # action choice; resolution.resolve fills it from intent.raw_text).
+    raw_text: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["kind"] = self.kind.value
+        d["band"] = self.band.value if self.band else None
+        d["cost"] = self.cost.to_dict() if self.cost else None
         return d
 
 

@@ -22,6 +22,10 @@ HOW_TO_PLAY = (
     "斜線指令：`/character`（角色卡）、`/scene`（目前場景）、`/roll 1d20+3`（手動擲骰）。"
 )
 
+# Per-scene cost pools (design §4.7). When a check lands in PARTIAL or FAILURE the
+# engine picks a CostType from this list; severity is picked by band. Each entry is
+# the string value of a CostType enum; the engine cycles through them deterministically
+# (via the seeded RNG) so testing stays reproducible. Order is descriptive priority.
 SCENES: list[dict] = [
     {
         "id": "tavern",
@@ -38,6 +42,7 @@ SCENES: list[dict] = [
             "perception": 15,
             "intimidation": 15,
         },
+        "cost_pool": ["relation", "attention", "time"],
         "onboarding": [
             "請老佩林喝一杯，問清楚商隊原本要去哪裡。（說服/洞悉）",
             "掃視房間，看看有沒有人在偷聽。（察覺）",
@@ -61,6 +66,7 @@ SCENES: list[dict] = [
             "perception": 13,
             "acrobatics": 12,
         },
+        "cost_pool": ["time", "trace", "resource"],
         "onboarding": [
             "搜索翻覆貨車，尋找線索。（調查）",
             "尋找離開道路的足跡。（求生）",
@@ -78,6 +84,7 @@ SCENES: list[dict] = [
         ),
         "npcs": [],
         "challenges": {},
+        "cost_pool": ["resource", "exposure"],
         "onboarding": [
             "輪到你時，可以說：用長劍攻擊一隻哥布林。",
             "萊拉可以施放聖焰或曳光彈，也可以用治療傷口替同伴恢復。",
@@ -101,6 +108,7 @@ SCENES: list[dict] = [
             "stealth": 15,
             "deception": 15,
         },
+        "cost_pool": ["exposure", "attention", "relation"],
         "onboarding": [
             "戰鬥：衝向葛利克斯！（開始與首領和副手交戰）",
             "談判：試著說服葛利克斯拿走金幣，放走護衛。（說服）",
