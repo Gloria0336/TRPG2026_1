@@ -13,9 +13,12 @@ from typing import TYPE_CHECKING
 
 from . import rules_5e
 from .types import Character, Intent, ResolutionResult, ResultKind, SKILLS
+from ..logging_setup import get_logger
 
 if TYPE_CHECKING:
     from ..state.game_state import GameState
+
+log = get_logger("resolution")
 
 # Map common free-text verbs to a governing 5e skill so the engine is robust even
 # when the AI hands us a loose `approach`.
@@ -66,26 +69,36 @@ def determine_dc(state: "GameState", intent: Intent, proposed_dc: int | None) ->
     skill = normalize_approach(intent.approach)
     for key in (skill, intent.approach, intent.action):
         if key and str(key).lower() in challenges:
-            return int(challenges[str(key).lower()])
+            dc = int(challenges[str(key).lower()])
+            log.debug("determine_dc: matched scene challenge key=%s → DC %d", key, dc)
+            return dc
     if proposed_dc is not None:
-        return rules_5e.nearest_anchor(int(proposed_dc))
-    return 12  # sensible "medium" default when nothing else applies
+        dc = rules_5e.nearest_anchor(int(proposed_dc))
+        log.debug("determine_dc: snapped AI-proposed %s → DC %d", proposed_dc, dc)
+        return dc
+    log.debug("determine_dc: defaulting to DC 12 (no scene match, no AI proposal)")
+    return 12
 
 
 def resolve(state: "GameState", intent: Intent, *, proposed_dc: int | None = None) -> ResolutionResult:
     """Resolve an out-of-combat Tier-A intent into a ResolutionResult and log it."""
     actor = state.characters.get(intent.actor_id)
     if actor is None:
+        log.error("resolve: unknown actor=%s known=%s", intent.actor_id, list(state.characters))
         raise KeyError(f"Unknown actor: {intent.actor_id}")
 
     skill = normalize_approach(intent.approach or intent.action)
     dc = determine_dc(state, intent, proposed_dc)
     advantage, disadvantage = state.scene.advantage_for(skill)
+    log.info("resolve: actor=%s skill=%s dc=%s adv=%s disadv=%s",
+             actor.name, skill, dc, advantage, disadvantage)
 
     result = rules_5e.ability_check(actor, skill, dc, advantage=advantage, disadvantage=disadvantage)
     if intent.target:
         result.target_name = intent.target
 
+    log.info("resolve: result success=%s roll=%s summary=%s",
+             result.success, result.roll_breakdown, result.summary)
     state.log_result(result)
     return result
 

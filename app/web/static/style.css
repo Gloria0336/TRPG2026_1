@@ -55,6 +55,34 @@ main {
 .hidden { display: none; }
 code { background: #00000040; padding: 1px 6px; border-radius: 5px; }
 
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.monitor { min-height: 118px; }
+.monitor-row { display: flex; align-items: center; gap: 9px; font-weight: 700; }
+.monitor-detail { color: var(--muted); font-size: .82rem; margin-top: 8px; overflow-wrap: anywhere; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.online { background: var(--green); box-shadow: 0 0 0 4px rgba(106,168,79,.14); }
+.dot.warning { background: var(--gold); box-shadow: 0 0 0 4px rgba(216,166,87,.14); }
+.dot.offline { background: var(--red); box-shadow: 0 0 0 4px rgba(197,80,62,.14); }
+
+.claim-list { display: flex; flex-direction: column; gap: 8px; }
+.claim {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.claim-status { color: var(--muted); text-align: right; }
+.claim.claimed .claim-status { color: var(--green); }
+.empty { color: var(--muted); }
+
 .scene-summary { font-size: 1.02rem; }
 .npcs { margin-top: 10px; color: var(--muted); font-size: .9rem; }
 .npcs span { display: inline-block; background: var(--panel-2); padding: 3px 9px; border-radius: 999px; margin: 3px 4px 0 0; }
@@ -73,6 +101,16 @@ code { background: #00000040; padding: 1px 6px; border-radius: 5px; }
 .card.npc { border-style: dashed; }
 .card .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .card .name .lvl { color: var(--muted); font-weight: 400; font-size: .82rem; }
+.claim-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(91,143,176,.14);
+  color: var(--muted);
+  font-size: .75rem;
+}
+.claim-badge.claimed { background: rgba(106,168,79,.14); color: var(--green); }
 .card .blurb { color: var(--muted); font-size: .82rem; margin: 4px 0 10px; min-height: 2.4em; }
 
 .hpbar { background: #00000050; border-radius: 999px; height: 16px; overflow: hidden; position: relative; }
@@ -101,3 +139,10 @@ code { background: #00000040; padding: 1px 6px; border-radius: 5px; }
 .log-list .summary { font-size: .9rem; }
 .log-list .actor { color: var(--gold); font-weight: 600; }
 .log-list .narration { color: var(--muted); font-style: italic; margin-top: 4px; font-size: .9rem; }
+
+@media (max-width: 720px) {
+  .status-grid { grid-template-columns: 1fr; }
+  header { align-items: flex-start; gap: 10px; flex-direction: column; }
+  .claim { flex-direction: column; gap: 2px; }
+  .claim-status { text-align: left; }
+}

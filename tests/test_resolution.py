@@ -55,3 +55,51 @@ def test_snapshot_roundtrip():
     assert len(gs2.event_log) == len(gs.event_log)
     assert gs2.characters["pc_bram"].name == "Bram Ironwood"
     assert gs2.characters["pc_bram"].find_action("Longsword") is not None
+
+
+def test_snapshot_load_clears_unresumable_pending_action():
+    gs = _fresh()
+    gs.claim_pc("user-1", "pc_bram")
+    gs.begin_freeplay_action("pc_bram")
+
+    gs2 = game_state.GameState.from_dict(gs.to_dict())
+
+    assert gs2.pending_freeplay_actor_id() is None
+
+
+def test_active_campaign_tracks_started_not_over_state():
+    game_state.set_state(None)
+    assert not game_state.has_active_campaign()
+
+    gs = game_state.reset_state(channel_id=1)
+    assert game_state.has_active_campaign()
+
+    gs.flags["over"] = True
+    assert not game_state.has_active_campaign()
+    game_state.set_state(None)
+
+
+def test_claim_pc_prevents_two_players_using_same_character():
+    gs = _fresh()
+    assert gs.claim_pc("user-1", "pc_bram")
+    assert not gs.claim_pc("user-2", "pc_bram")
+    assert gs.pc_for_user("user-1").id == "pc_bram"
+    assert gs.pc_for_user("user-2") is None
+
+
+def test_freeplay_turn_order_waits_for_next_player():
+    gs = _fresh()
+    assert gs.claim_pc("user-1", "pc_lyra")
+    assert gs.claim_pc("user-2", "pc_bram")
+
+    assert gs.freeplay_turn_order() == ["pc_lyra", "pc_bram"]
+    assert gs.current_freeplay_actor_id() == "pc_lyra"
+
+    gs.begin_freeplay_action("pc_lyra")
+    assert gs.pending_freeplay_actor_id() == "pc_lyra"
+
+    assert gs.complete_freeplay_action("pc_lyra") == "pc_bram"
+    assert gs.pending_freeplay_actor_id() is None
+
+    assert gs.complete_freeplay_action("pc_bram") == "pc_lyra"
+    assert gs.flags["freeplay_round"] == 2

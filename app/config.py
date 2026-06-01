@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Project root = parent of the `app` package directory.
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     # OpenRouter / LLM
     openrouter_api_key: str = ""
     model_intent: str = "openai/gpt-4o-mini"
-    model_narrate: str = "anthropic/claude-3.5-sonnet"
+    model_narrate: str = "anthropic/claude-sonnet-4.5"
     openrouter_app_url: str = "http://localhost:8000"
     openrouter_app_name: str = "AI Living World MVP"
 
@@ -42,6 +43,13 @@ class Settings(BaseSettings):
     dice_seed: int | None = None
     narrate_context_window: int = 12
     ai_offline: bool = False
+
+    @field_validator("dice_seed", mode="before")
+    @classmethod
+    def blank_dice_seed_means_random(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
 
     @property
     def session_path(self) -> Path:

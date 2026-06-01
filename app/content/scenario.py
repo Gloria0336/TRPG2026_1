@@ -1,138 +1,129 @@
 """The short one-shot: "The Dawnbridge Caravan".
 
-A ~30–45 min, 4-scene adventure for two PCs designed to onboard TRPG newbies:
-1. a social hook, 2. an exploration/skill challenge, 3. a combat, 4. a branching climax.
-Scene data is plain dicts; the GM/bot advances scenes and the AI narrates from `summary`.
+A short 4-scene adventure for two PCs designed to onboard TRPG newcomers.
 """
 from __future__ import annotations
 
-# Title shown by /start.
-TITLE = "The Dawnbridge Caravan"
+# Title shown by /start and the dashboard.
+TITLE = "晨橋商隊"
 
 INTRO = (
-    "**The Dawnbridge Caravan** — a short adventure for two.\n\n"
-    "The frontier village of **Dawnbridge** sits where the East Road crosses a rushing river. "
-    "Three days ago, a merchant caravan set out east and never reached the next town. "
-    "Tonight, in the warm light of the Gilded Tankard tavern, someone is about to ask for help."
+    "**晨橋商隊**，一段適合兩人的短篇冒險。\n\n"
+    "邊境村莊**晨橋村**坐落在東路跨越湍急河川之處。三天前，一支商隊沿東路出發，"
+    "卻始終沒有抵達下一座城鎮。今晚，在鎏金酒杯酒館溫暖的燈光下，有人正準備開口求助。"
 )
 
 HOW_TO_PLAY = (
-    "**How to play** — just say what your character does, in plain language, in this channel.\n"
-    "• *“I ask the bartender about the missing caravan.”* → I'll work out which skill check that is.\n"
-    "• If a check is needed, I'll post a 🎲 button — click it to roll. The dice are rolled on the "
-    "server; the button just reveals the result.\n"
-    "• Not sure what to do? Say something vague and I'll offer you options.\n"
-    "• Slash commands: `/character` (your sheet), `/scene` (where you are), `/roll 1d20+3` (manual roll)."
+    "**玩法說明**：只要在這個頻道用白話說出你的角色要做什麼。\n"
+    "例如：問酒保失蹤商隊的事。我會判斷這需要哪一種技能檢定。\n"
+    "如果需要擲骰，我會貼出一個擲骰按鈕，點擊後就會顯示結果。骰子會在伺服器端擲出，"
+    "按鈕只負責公開結果。\n"
+    "不知道該做什麼也沒關係，說個大方向，我會提供可行選項。\n"
+    "斜線指令：`/character`（角色卡）、`/scene`（目前場景）、`/roll 1d20+3`（手動擲骰）。"
 )
 
-# ── Scenes ──────────────────────────────────────────────────────────────────
 SCENES: list[dict] = [
     {
         "id": "tavern",
-        "title": "Scene 1 — The Gilded Tankard",
+        "title": "場景 1：鎏金酒杯酒館",
         "summary": (
-            "The party sits in the crowded Gilded Tankard tavern in Dawnbridge. Old Perrin, a "
-            "worried merchant, approaches: his caravan vanished on the East Road three days ago "
-            "and the militia won't search. He'll pay 50 gold to whoever finds it. A nervous, "
-            "hooded patron in the corner keeps glancing at Perrin."
+            "隊伍坐在晨橋村熱鬧的鎏金酒杯酒館裡。焦急的商人老佩林上前求助："
+            "他的商隊三天前在東路上失蹤，民兵又不願搜救。只要有人能找回商隊，"
+            "他願意支付 50 枚金幣。角落裡，一名緊張的兜帽客不時偷瞄佩林。"
         ),
-        "npcs": ["Old Perrin (merchant)", "a nervous hooded patron"],
+        "npcs": ["老佩林（商人）", "緊張的兜帽客"],
         "challenges": {
-            "persuasion": 13,    # haggle Perrin up / get more detail
-            "insight": 12,       # read whether Perrin is hiding something
-            "perception": 15,    # notice the hooded patron eavesdropping
-            "intimidation": 15,  # lean on the hooded patron
+            "persuasion": 13,
+            "insight": 12,
+            "perception": 15,
+            "intimidation": 15,
         },
         "onboarding": [
-            "“I buy Old Perrin a drink and ask exactly where the caravan was headed.” (persuasion/insight)",
-            "“I glance around the room — is anyone listening in?” (perception)",
-            "“I accept the job.” (advances the story)",
+            "請老佩林喝一杯，問清楚商隊原本要去哪裡。（說服/洞悉）",
+            "掃視房間，看看有沒有人在偷聽。（察覺）",
+            "接受委託。（推進故事）",
         ],
         "encounter": None,
-        "advance_hint": "Once the party accepts the job and gathers what they can, move to the East Road.",
+        "advance_hint": "當隊伍接受委託並蒐集完線索後，前往東路。",
     },
     {
         "id": "east_road",
-        "title": "Scene 2 — The East Road",
+        "title": "場景 2：東路",
         "summary": (
-            "Morning mist clings to the forest where the East Road narrows. A few hundred paces "
-            "in, the party finds the caravan: two overturned wagons, scattered crates, dark "
-            "bloodstains — but few bodies. Crude tracks lead off the road toward a rocky hillside. "
-            "A tripwire glints across the path ahead."
+            "清晨的薄霧貼著森林，東路在此逐漸變窄。走了幾百步後，隊伍找到了商隊："
+            "兩輛翻覆的貨車、散落的箱子、深色血跡，卻幾乎沒有屍體。粗糙的足跡離開道路，"
+            "通往一處岩石山坡。前方小徑上，有一條絆線微微反光。"
         ),
         "npcs": [],
         "challenges": {
-            "investigation": 12,  # search the wreck for clues
-            "survival": 13,       # track where the attackers dragged captives
-            "perception": 13,     # spot the tripwire / ambush sign
-            "acrobatics": 12,     # if someone trips the wire (DEX)
+            "investigation": 12,
+            "survival": 13,
+            "perception": 13,
+            "acrobatics": 12,
         },
         "onboarding": [
-            "“I search the wrecked wagons for clues.” (investigation)",
-            "“I look for tracks leading away from the road.” (survival)",
-            "“I scan the path ahead for traps.” (perception)",
+            "搜索翻覆貨車，尋找線索。（調查）",
+            "尋找離開道路的足跡。（求生）",
+            "檢查前方小徑是否有陷阱。（察覺）",
         ],
         "encounter": None,
-        "advance_hint": "Following the tracks leads to the goblin warren's mouth — and an ambush.",
+        "advance_hint": "沿著足跡前進，會抵達哥布林巢穴入口，並遭遇伏擊。",
     },
     {
         "id": "ambush",
-        "title": "Scene 3 — Ambush at the Warren",
+        "title": "場景 3：巢穴前的伏擊",
         "summary": (
-            "The tracks end at a cleft in the hillside reeking of woodsmoke and goblin. As the "
-            "party approaches, three goblins burst from the brush with rusty scimitars and a "
-            "shrieking war-cry. Roll for initiative!"
+            "足跡止於山坡裂隙前，裡頭飄出木煙與哥布林的臭味。隊伍靠近時，三隻哥布林"
+            "從灌木叢衝出，揮舞生鏽彎刀，尖叫著發出戰吼。擲先攻！"
         ),
         "npcs": [],
         "challenges": {},
         "onboarding": [
-            "On your turn, say e.g. “I attack a goblin with my Longsword.”",
-            "Lyra can cast Sacred Flame or Guiding Bolt, or heal with Cure Wounds.",
-            "I'll post a 🎲 button for each attack.",
+            "輪到你時，可以說：用長劍攻擊一隻哥布林。",
+            "萊拉可以施放聖焰或曳光彈，也可以用治療傷口替同伴恢復。",
+            "每次攻擊我都會貼出擲骰按鈕。",
         ],
         "encounter": [("goblin", 3)],
-        "advance_hint": "With the ambushers down, the party can press into the warren after the boss.",
+        "advance_hint": "擊倒伏擊者後，隊伍可以深入巢穴追查首領。",
     },
     {
         "id": "warren",
-        "title": "Scene 4 — The Warren (Climax)",
+        "title": "場景 4：巢穴（高潮）",
         "summary": (
-            "Inside the smoky warren, Grix the Goblin Boss holds a captured caravan guard at "
-            "knifepoint, a lone goblin lieutenant at his side. Grix sneers: “Leave now, or the "
-            "hostage dies!” The party can fight, talk Grix down, or try to slip the hostage free."
+            "煙霧瀰漫的巢穴深處，哥布林首領葛利克斯用刀抵著一名被俘商隊護衛，"
+            "身旁還站著一名哥布林副手。葛利克斯冷笑道：「現在離開，不然人質就死！」"
+            "隊伍可以開戰、說服葛利克斯退讓，或嘗試偷偷救出人質。"
         ),
-        "npcs": ["Grix the Goblin Boss", "a captured caravan guard"],
+        "npcs": ["哥布林首領葛利克斯", "被俘商隊護衛"],
         "challenges": {
-            # Non-combat resolutions of the climax:
-            "persuasion": 15,    # talk Grix into a deal / surrender
-            "intimidation": 15,  # cow the goblins into fleeing
-            "stealth": 15,       # slip around and free the hostage
-            "deception": 15,     # bluff a bigger force is coming
+            "persuasion": 15,
+            "intimidation": 15,
+            "stealth": 15,
+            "deception": 15,
         },
         "onboarding": [
-            "Fight: “I charge Grix!” → starts combat against the boss and his lieutenant.",
-            "Talk: “I try to convince Grix to take the gold and let the guard go.” (persuasion)",
-            "Sneak: “I slip into the shadows to free the hostage.” (stealth)",
+            "戰鬥：衝向葛利克斯！（開始與首領和副手交戰）",
+            "談判：試著說服葛利克斯拿走金幣，放走護衛。（說服）",
+            "潛行：溜進陰影中救出人質。（隱匿）",
         ],
-        "encounter": [("goblin_boss", 1), ("goblin", 1)],  # used only if the party chooses to fight
-        "advance_hint": "However it ends, the fate of the caravan and the hostage is now written.",
+        "encounter": [("goblin_boss", 1), ("goblin", 1)],
+        "advance_hint": "不論結局如何，商隊與人質的命運已在此刻寫定。",
     },
 ]
 
 ENDINGS: dict[str, str] = {
     "victory": (
-        "With the goblins beaten and the hostage freed, the party leads the survivors back to "
-        "Dawnbridge. Old Perrin weeps with relief and pays the promised gold — plus a little extra. "
-        "Songs of the Dawnbridge rescue will be sung in the Gilded Tankard for weeks. **The End.**"
+        "哥布林被擊敗，人質重獲自由，隊伍帶著倖存者回到晨橋村。老佩林如釋重負地落淚，"
+        "付出承諾的金幣，還多添了一點謝禮。接下來數週，鎏金酒杯酒館都會傳唱晨橋救援的故事。"
+        "**劇終。**"
     ),
     "peaceful": (
-        "Without a single killing blow, the party walks the freed hostage out of the warren. "
-        "Word spreads that the new adventurers are as clever as they are brave. Old Perrin pays in "
-        "full, and even the goblins remember the day they were outwitted, not slaughtered. **The End.**"
+        "沒有任何致命一擊，隊伍帶著獲救的人質走出巢穴。新冒險者既勇敢又聰明的名聲傳開。"
+        "老佩林全額支付報酬，就連哥布林也記住了那天：他們不是被屠殺，而是被智取。**劇終。**"
     ),
     "defeat": (
-        "The warren falls silent but for goblin laughter. The party's tale ends here in the dark — "
-        "though in a living world, even the fallen are remembered. **The End.**"
+        "巢穴裡只剩哥布林的笑聲迴盪，隊伍的故事在黑暗中告終。但在活生生的世界裡，"
+        "即使倒下的人也會被記得。**劇終。**"
     ),
 }
 

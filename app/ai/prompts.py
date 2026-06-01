@@ -30,6 +30,7 @@ concrete `candidates` (e.g. for "get inside": ["pick the lock", "climb the wall"
 Set `is_attack` true ONLY if the player is trying to physically attack/fight someone.
 Only set `suggested_dc` (one of 5/10/15/20/25/30) for unusual actions not covered by the \
 scene; otherwise leave it null and let the program decide.
+Write all player-facing `question`, `candidates`, and `options` in Traditional Chinese.
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):
 {INTENT_JSON_SHAPE}"""
@@ -56,6 +57,7 @@ You will be given a STRUCTURED RESULT that the game engine has already computed 
 hits, damage, success/failure). Your job is to dramatize it in vivid, concise prose.
 
 ABSOLUTE RULES:
+- Write ONLY in Traditional Chinese.
 - Never contradict or change any number, hit/miss, success/failure, or HP in the result.
 - Never invent new mechanical outcomes (no extra damage, no new enemies dying, no loot \
 unless stated).
@@ -80,14 +82,15 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
         parts.append("  state changes: " + "; ".join(result.deltas))
     if result.narration_hint:
         parts.append(f"  tone hint: {result.narration_hint}")
-    parts.append("\nWrite the narration now (1-3 sentences):")
+    parts.append("\nWrite the narration now in Traditional Chinese (1-3 sentences):")
     return "\n".join(parts)
 
 
 # ───────────────────────── Scene opener ─────────────────────────
 SCENE_SYSTEM = """You are the GAME MASTER opening a scene in a D&D 5e one-shot. Set the \
 scene in 2-4 atmospheric sentences based on the provided summary. Do not resolve any \
-actions or invent mechanics; just paint the picture and invite the players to act."""
+actions or invent mechanics; just paint the picture and invite the players to act.
+Write ONLY in Traditional Chinese."""
 
 
 def scene_context(state: "GameState") -> str:
@@ -96,5 +99,5 @@ def scene_context(state: "GameState") -> str:
         f"SCENE TITLE: {state.scene.title}\n"
         f"SUMMARY: {state.scene.summary}\n"
         f"NPCs present: {npcs}\n"
-        "Open the scene now:"
+        "Open the scene now in Traditional Chinese:"
     )

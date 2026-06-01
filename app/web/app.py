@@ -1,9 +1,4 @@
-"""FastAPI app for the read-only dashboard.
-
-Shares the in-process GameState with the Discord bot (no DB). Live updates are pushed
-over Server-Sent Events; because there is no database, the SSE loop simply observes the
-shared in-memory object and emits a fresh snapshot whenever its version changes.
-"""
+"""FastAPI app for the read-only dashboard."""
 from __future__ import annotations
 
 import asyncio
@@ -14,20 +9,28 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
+from ..ai import orchestrator
 from ..config import STATIC_DIR
 from ..state import game_state
 
-app = FastAPI(title="AI Living World — Dashboard")
+app = FastAPI(title="AI Living World 儀表板")
 
 
-def _snapshot() -> dict:
+async def _snapshot() -> dict:
     gs = game_state.get_state()
-    return gs.dashboard_view() if gs else {"started": False, "version": -1}
+    snap = gs.dashboard_view() if gs else {"started": False, "version": -1}
+    snap["ai"] = await orchestrator.health()
+    return snap
 
 
 @app.get("/api/state")
 async def api_state() -> JSONResponse:
-    return JSONResponse(_snapshot())
+    return JSONResponse(await _snapshot())
+
+
+@app.get("/api/ai/health")
+async def api_ai_health() -> JSONResponse:
+    return JSONResponse(await orchestrator.health(force=True))
 
 
 @app.get("/api/stream")
@@ -37,13 +40,14 @@ async def api_stream(request: Request) -> EventSourceResponse:
         while True:
             if await request.is_disconnected():
                 break
+            snap = await _snapshot()
             gs = game_state.get_state()
-            snap = gs.dashboard_view() if gs else {"started": False, "version": -1}
-            key = (id(gs), snap.get("version"))
+            ai = snap.get("ai") or {}
+            key = (id(gs), snap.get("version"), ai.get("status"), ai.get("checked_at"))
             if key != last_key:
                 last_key = key
                 yield {"event": "state", "data": json.dumps(snap, ensure_ascii=False)}
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2.0)
 
     return EventSourceResponse(event_gen())
 
@@ -53,5 +57,4 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
-# Static assets (app.js, style.css).
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

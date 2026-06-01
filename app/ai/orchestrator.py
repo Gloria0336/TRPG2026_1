@@ -3,27 +3,38 @@
 Layered routing (§8.2): MODEL_INTENT (cheap) parses intent; MODEL_NARRATE (strong)
 narrates. If AI is offline / unkeyed / errors out, we fall back to rule-based parsing
 and canned narration so a session never hard-stops — and so tests run without network.
+
+Every step is traced through `trpg.ai` so `logs/trace.log` shows exactly which stage
+took the fallback path (AI disabled, HTTP failed, JSON malformed, schema rejected …).
 """
 from __future__ import annotations
 
 import json
 import re
+import time
 
 import httpx
 
 from ..config import settings
 from ..engine.resolution import APPROACH_SYNONYMS, normalize_approach
 from ..engine.types import Character, Intent, IntentTier, ResolutionResult, SKILLS
+from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
 from . import prompts
 from .schemas import IntentParse
 
+log = get_logger("ai")
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 _ATTACK_WORDS = {"attack", "hit", "strike", "stab", "slash", "shoot", "fight",
                  "kill", "swing", "fire", "smite", "charge", "punch"}
 
 _client: httpx.AsyncClient | None = None
+_health_cache: dict | None = None
+_health_checked_at: float = 0.0
+_HEALTH_TTL_SECONDS = 15.0
 
 
 def _http() -> httpx.AsyncClient:
@@ -41,7 +52,60 @@ async def aclose() -> None:
 
 
 def _ai_enabled() -> bool:
-    return not settings.ai_offline and bool(settings.openrouter_api_key)
+    enabled = not settings.ai_offline and bool(settings.openrouter_api_key)
+    if not enabled:
+        log.warning("AI disabled — ai_offline=%s has_key=%s", settings.ai_offline, bool(settings.openrouter_api_key))
+    return enabled
+
+
+def _health_payload(status: str, message: str, latency_ms: int | None = None) -> dict:
+    return {
+        "status": status,
+        "message": message,
+        "latency_ms": latency_ms,
+        "ai_offline": settings.ai_offline,
+        "has_api_key": bool(settings.openrouter_api_key),
+        "model_intent": settings.model_intent,
+        "model_narrate": settings.model_narrate,
+        "checked_at": int(time.time()),
+    }
+
+
+async def health(force: bool = False) -> dict:
+    """Lightweight OpenRouter connectivity check for the dashboard."""
+    global _health_cache, _health_checked_at
+    now = time.monotonic()
+    if not force and _health_cache and now - _health_checked_at < _HEALTH_TTL_SECONDS:
+        return _health_cache
+
+    if settings.ai_offline:
+        _health_cache = _health_payload("offline", "AI offline mode is enabled.")
+        _health_checked_at = now
+        return _health_cache
+    if not settings.openrouter_api_key:
+        _health_cache = _health_payload("missing_key", "OPENROUTER_API_KEY is not configured.")
+        _health_checked_at = now
+        return _health_cache
+
+    started = time.perf_counter()
+    try:
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "HTTP-Referer": settings.openrouter_app_url,
+            "X-Title": settings.openrouter_app_name,
+        }
+        log.debug("health: GET %s", OPENROUTER_MODELS_URL)
+        resp = await _http().get(OPENROUTER_MODELS_URL, headers=headers)
+        resp.raise_for_status()
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        log.info("health: online (%d ms)", latency_ms)
+        _health_cache = _health_payload("online", "OpenRouter is reachable.", latency_ms)
+    except Exception as exc:  # noqa: BLE001
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        log.error("health: error after %d ms — %s: %s", latency_ms, type(exc).__name__, exc, exc_info=True)
+        _health_cache = _health_payload("error", f"{type(exc).__name__}: {exc}", latency_ms)
+    _health_checked_at = now
+    return _health_cache
 
 
 async def _chat(model: str, system: str, user: str, *, json_mode: bool = False, max_tokens: int = 400) -> str:
@@ -59,20 +123,56 @@ async def _chat(model: str, system: str, user: str, *, json_mode: bool = False, 
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
-    resp = await _http().post(OPENROUTER_URL, headers=headers, json=body)
+
+    log.info("_chat → POST %s model=%s json_mode=%s max_tokens=%d",
+             OPENROUTER_URL, model, json_mode, max_tokens)
+    log.debug("_chat system: %s", truncate(system, 400))
+    log.debug("_chat user:   %s", truncate(user, 1200))
+
+    started = time.perf_counter()
+    try:
+        resp = await _http().post(OPENROUTER_URL, headers=headers, json=body)
+    except Exception as exc:
+        elapsed = int((time.perf_counter() - started) * 1000)
+        log.error("_chat HTTP transport failure after %d ms — %s: %s",
+                  elapsed, type(exc).__name__, exc, exc_info=True)
+        raise
+
+    elapsed = int((time.perf_counter() - started) * 1000)
+    log.info("_chat ← status=%s elapsed=%d ms", resp.status_code, elapsed)
+
+    if resp.status_code >= 400:
+        log.error("_chat HTTP %s body: %s", resp.status_code, truncate(resp.text, 800))
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        log.error("_chat response is not JSON — %s body=%s", type(exc).__name__, truncate(resp.text, 800), exc_info=True)
+        raise
+
+    try:
+        content = payload["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        log.error("_chat payload missing choices[0].message.content — payload=%s",
+                  truncate(json.dumps(payload, ensure_ascii=False), 800), exc_info=True)
+        raise
+    log.debug("_chat content: %s", truncate(content, 1200))
+    return content
 
 
 # ───────────────────────── Intent parsing ─────────────────────────
 async def interpret(state: GameState, actor_id: str, text: str) -> tuple[Intent, int | None]:
     """Parse a player's message into a structured Intent (+ optional proposed DC)."""
+    log.info("interpret() actor=%s text=%r scene=%s", actor_id, text, state.scene.id)
     actor = state.characters.get(actor_id)
     if actor is None:
+        log.error("interpret: unknown actor_id=%s known=%s", actor_id, list(state.characters))
         raise KeyError(actor_id)
 
     if _ai_enabled():
         try:
+            log.debug("interpret: calling AI with model=%s", settings.model_intent)
             raw = await _chat(
                 settings.model_intent,
                 prompts.INTENT_SYSTEM,
@@ -80,12 +180,33 @@ async def interpret(state: GameState, actor_id: str, text: str) -> tuple[Intent,
                 json_mode=True,
                 max_tokens=300,
             )
-            parsed = IntentParse.model_validate_json(_extract_json(raw))
-            return _to_intent(actor_id, text, parsed), parsed.snapped_dc()
-        except Exception:
-            # Any failure (network, schema, parse) → safe rule-based fallback.
-            pass
-    return _offline_parse(state, actor, text), None
+            log.debug("interpret: raw model reply: %s", truncate(raw, 1200))
+            extracted = _extract_json(raw)
+            log.debug("interpret: extracted JSON: %s", truncate(extracted, 1200))
+            parsed = IntentParse.model_validate_json(extracted)
+            log.info("interpret: AI parse OK tier=%s action=%s target=%s approach=%s is_attack=%s dc=%s",
+                     parsed.tier, parsed.action, parsed.target, parsed.approach,
+                     parsed.is_attack, parsed.snapped_dc())
+            intent = _to_intent(actor_id, text, parsed)
+            log.debug("interpret: built Intent=%r", intent)
+            return intent, parsed.snapped_dc()
+        except httpx.HTTPStatusError as exc:
+            log.warning("interpret: AI HTTP %s — falling back to offline parse. body=%s",
+                        exc.response.status_code, truncate(exc.response.text, 600))
+        except httpx.HTTPError as exc:
+            log.warning("interpret: AI transport failure (%s: %s) — falling back to offline parse.",
+                        type(exc).__name__, exc)
+        except Exception as exc:
+            # Schema, JSON, or unexpected error — log full traceback so root cause is visible.
+            log.error("interpret: AI fallback via %s: %s: %s",
+                      settings.model_intent, type(exc).__name__, exc, exc_info=True)
+    else:
+        log.info("interpret: AI disabled, using offline parser")
+
+    fallback = _offline_parse(state, actor, text)
+    log.info("interpret: offline parse → tier=%s action=%s target=%s approach=%s is_attack=%s",
+             fallback.tier.value, fallback.action, fallback.target, fallback.approach, fallback.is_attack)
+    return fallback, None
 
 
 def _extract_json(raw: str) -> str:
@@ -122,14 +243,12 @@ def _offline_parse(state: GameState, actor: Character, text: str) -> Intent:
 
     is_attack = any(t in _ATTACK_WORDS for t in tokens)
 
-    # Find a skill/verb.
     approach = None
     for t in tokens:
         if t in SKILLS or t in APPROACH_SYNONYMS:
             approach = normalize_approach(t)
             break
 
-    # Guess a target from NPCs present or scene mentions.
     target = None
     for c in state.characters.values():
         if not c.is_pc and c.name.lower().split()[0] in low:
@@ -149,14 +268,12 @@ def _offline_parse(state: GameState, actor: Character, text: str) -> Intent:
         return Intent(actor_id=actor.id, raw_text=text, tier=IntentTier.A,
                       action=approach, target=target, approach=approach)
 
-    # No clear method but some content → tier B with generic candidates.
     if len(tokens) >= 2:
         return Intent(
             actor_id=actor.id, raw_text=text, tier=IntentTier.B, target=target,
             candidates=["investigate it (Investigation)", "look closer (Perception)",
                         "talk it out (Persuasion)", "force the issue (Athletics)"],
         )
-    # Too vague → tier C.
     return Intent(
         actor_id=actor.id, raw_text=text, tier=IntentTier.C,
         question="What would you like to do?",
@@ -167,33 +284,82 @@ def _offline_parse(state: GameState, actor: Character, text: str) -> Intent:
 # ───────────────────────── Narration ─────────────────────────
 async def narrate(state: GameState, result: ResolutionResult) -> str:
     """Turn a computed ResolutionResult into prose. Never alters the result."""
+    log.info("narrate() kind=%s actor=%s summary=%s",
+             getattr(result, "kind", "?"), result.actor_name, truncate(result.summary, 200))
     if _ai_enabled():
         try:
-            return await _chat(
+            prose = await _chat(
                 settings.model_narrate,
                 prompts.NARRATE_SYSTEM,
                 prompts.narrate_context(state, result),
                 max_tokens=200,
             )
-        except Exception:
-            pass
-    return _canned_narration(result)
+            log.info("narrate: AI narration OK (%d chars)", len(prose))
+            log.debug("narrate: prose=%s", truncate(prose, 500))
+            return prose
+        except httpx.HTTPStatusError as exc:
+            log.warning("narrate: AI HTTP %s — using canned narration. body=%s",
+                        exc.response.status_code, truncate(exc.response.text, 600))
+        except httpx.HTTPError as exc:
+            log.warning("narrate: AI transport failure (%s: %s) — using canned narration.",
+                        type(exc).__name__, exc)
+        except Exception as exc:
+            log.error("narrate: fallback via %s: %s: %s",
+                      settings.model_narrate, type(exc).__name__, exc, exc_info=True)
+    else:
+        log.info("narrate: AI disabled, using canned narration")
+
+    canned = _canned_narration(result)
+    log.info("narrate: canned narration (%d chars)", len(canned))
+    log.debug("narrate: canned=%s", truncate(canned, 500))
+    return canned
 
 
 def _canned_narration(result: ResolutionResult) -> str:
     """Template narration used offline — flavour from the engine's own hint/deltas."""
-    bits = [result.narration_hint or result.summary]
+    bits = [_fallback_hint_text(result.narration_hint) if result.narration_hint else result.summary]
     if result.deltas:
         bits.append(" ".join(result.deltas))
     return " ".join(b for b in bits if b)
 
 
+def _fallback_hint_text(hint: str) -> str:
+    hints = {
+        "Describe a decisive, lucky break.": "出現了決定性的幸運轉機。",
+        "Describe an unlucky complication.": "事情突然變糟，出現了麻煩的意外。",
+        "Describe a clean success.": "行動俐落成功，沒有額外波折。",
+        "Describe a setback; the attempt fails.": "嘗試失敗，局勢出現挫折。",
+        "Describe the moment vividly but briefly.": "場面短暫而鮮明地展開。",
+        "A tactical maneuver.": "這是一個戰術動作。",
+        "Land a solid, cinematic blow.": "攻擊紮實命中，場面俐落有力。",
+        "The attack misses or is turned aside.": "攻擊落空，或被對手巧妙化解。",
+        "Magic flares against the target.": "魔法在目標身上爆發出光芒。",
+        "The target resists the worst of it.": "目標撐過了最嚴重的影響。",
+        "Unerring magic strikes home.": "精準的魔法直擊目標。",
+        "Warm restorative energy mends wounds.": "溫暖的恢復能量縫合了傷口。",
+        "A fragile, fading moment between life and death.": "生死之間只剩下一線微弱的呼吸。",
+    }
+    return hints.get(hint, hint)
+
+
 async def open_scene(state: GameState) -> str:
+    log.info("open_scene() scene=%s title=%s", state.scene.id, state.scene.title)
     if _ai_enabled():
         try:
-            return await _chat(
+            prose = await _chat(
                 settings.model_narrate, prompts.SCENE_SYSTEM, prompts.scene_context(state), max_tokens=220
             )
-        except Exception:
-            pass
+            log.info("open_scene: AI OK (%d chars)", len(prose))
+            return prose
+        except httpx.HTTPStatusError as exc:
+            log.warning("open_scene: AI HTTP %s — using scene summary. body=%s",
+                        exc.response.status_code, truncate(exc.response.text, 600))
+        except httpx.HTTPError as exc:
+            log.warning("open_scene: AI transport failure (%s: %s) — using scene summary.",
+                        type(exc).__name__, exc)
+        except Exception as exc:
+            log.error("open_scene: fallback via %s: %s: %s",
+                      settings.model_narrate, type(exc).__name__, exc, exc_info=True)
+    else:
+        log.info("open_scene: AI disabled, using scene summary")
     return state.scene.summary

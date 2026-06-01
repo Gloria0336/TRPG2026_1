@@ -13,6 +13,11 @@ import uvicorn
 
 from .ai import orchestrator
 from .config import settings
+from .logging_setup import get_logger, setup_logging
+
+setup_logging()
+log = get_logger("run")
+
 from .discord_bot.bot import bot
 from .state import game_state
 from .web.app import app as web_app
@@ -39,12 +44,16 @@ async def main() -> None:
 
     tasks = [asyncio.create_task(_serve_web(), name="web")]
 
+    log.info("startup: ai_offline=%s has_key=%s model_intent=%s model_narrate=%s",
+             settings.ai_offline, bool(settings.openrouter_api_key),
+             settings.model_intent, settings.model_narrate)
+
     if settings.discord_token:
         tasks.append(asyncio.create_task(bot.start(settings.discord_token), name="discord"))
-        print(f"[run] Discord bot + dashboard at http://{settings.web_host}:{settings.web_port}")
+        log.info("Discord bot + dashboard at http://%s:%s", settings.web_host, settings.web_port)
     else:
-        print("[run] No DISCORD_TOKEN — dashboard only at "
-              f"http://{settings.web_host}:{settings.web_port} (set DISCORD_TOKEN to enable play).")
+        log.warning("No DISCORD_TOKEN — dashboard only at http://%s:%s (set DISCORD_TOKEN to enable play).",
+                    settings.web_host, settings.web_port)
 
     try:
         await asyncio.gather(*tasks)

@@ -1,138 +1,133 @@
-# AI Living World — 極簡化 MVP
+# AI Living World MVP
 
-A radically simplified MVP distilled from [`AI_Living_World_design_v1.0.md`](AI_Living_World_design_v1.0.md).
-It keeps the design's **core principle** — *the program owns all dice/state/judgment; the
-AI only parses intent and narrates, never touching a number* (§4.0) — but throws away the
-living-world simulation, database, factions, and custom ranks to validate three things fast:
+這是一個從 [`AI_Living_World_design_v1.0.md`](AI_Living_World_design_v1.0.md) 萃取出來、極度簡化的 MVP。
+它保留原設計的**核心原則**：*程式負責所有骰子、狀態與判定；AI 只負責解析意圖與敘事，絕不碰任何數值*，但先捨棄生活世界模擬、資料庫、派系與自訂等級系統，快速驗證三件事：
 
-1. **AI GM 可行性** — can an AI run a faithful D&D session without fudging the math?
-2. **前端操作性質** — do the Discord interactions (A/B/C method buttons, 🎲 dice button) and
-   the web dashboard feel good?
-3. **新手 onboarding** — can a TRPG newbie jump in with zero prep?
+1. **AI GM 可行性**：AI 能不能在不偷改數學結果的前提下，跑出忠實的 D&D 遊戲？
+2. **互動手感**：Discord 互動（A/B/C 方法按鈕、骰子按鈕）和網頁儀表板是否好用？
+3. **新手導入**：TRPG 新手能不能零準備直接加入？
 
-### What this MVP is
-- **Standard D&D 5e** — d20 ability/skill checks vs DC, and a full turn-based combat loop
-  (initiative, action economy, attack vs AC, damage, saving throws, death saves).
-- **Two pre-made level-3 PCs** (a Fighter and a Cleric) — no character creation.
-- **One short scenario** — *The Dawnbridge Caravan*, a ~30–45 min, 4-scene one-shot.
-- **Discord bot** (play) **+ read-only web dashboard** (spectate).
-- **No database** — a single in-memory `GameState`, snapshotted to `save/session.json`.
+### 這個 MVP 包含什麼
+
+- **標準 D&D 5e**：d20 屬性／技能檢定對抗 DC，以及完整的回合制戰鬥流程（先攻、動作經濟、攻擊對 AC、傷害、豁免、死亡豁免）。
+- **兩名預製 3 級玩家角色**：一名戰士與一名牧師，不包含創角流程。
+- **一個短劇本**：*The Dawnbridge Caravan*，約 30-45 分鐘、4 個場景的一次性冒險。
+- **Discord bot**（遊玩）**+ 唯讀網頁儀表板**（旁觀）。
+- **沒有資料庫**：使用單一記憶體內 `GameState`，並快照到 `save/session.json`。
 
 ---
 
-## Architecture (single process, no DB)
+## 架構（單一程序，無資料庫）
 
-Because there is no database to share state through, the Discord bot and the FastAPI
-dashboard run in **one Python process on one asyncio loop**, sharing the same in-memory
-`GameState` object (design §5 collapsed to a monolith for the MVP).
+因為沒有資料庫用來共享狀態，Discord bot 與 FastAPI 儀表板會在**同一個 Python 程序、同一個 asyncio loop** 中執行，並共享同一個記憶體內 `GameState` 物件（MVP 中將原設計簡化為單體架構）。
 
-```
-Discord NL → [AI] intent parse (cheap model) → tier A/B/C
-   A → engine resolves → 🎲 button → server rolls → reveal → [AI] narrate (strong model)
-   B → method buttons → player picks → (A)
-   C → clarifying buttons → player picks → (A)
-        ↓ every result appended to the in-memory event_log
-   Discord embeds  ←→  shared GameState  ←→  Web dashboard (SSE live updates)
+```text
+Discord 自然語言 -> [AI] 意圖解析（便宜模型）-> A/B/C 分級
+   A -> engine 執行判定 -> 骰子按鈕 -> 伺服器擲骰 -> 揭示結果 -> [AI] 敘事（強模型）
+   B -> 方法按鈕 -> 玩家選擇 -> (A)
+   C -> 釐清按鈕 -> 玩家選擇 -> (A)
+        -> 每個結果都附加到記憶體內 event_log
+   Discord embeds  <->  shared GameState  <->  Web dashboard（SSE 即時更新）
 ```
 
-| Layer | Module |
+| 層級 | 模組 |
 |---|---|
-| Resolution Engine (truth source) | [`app/engine/`](app/engine) — `dice.py`, `rules_5e.py`, `combat.py`, `resolution.py`, `types.py` |
-| AI Orchestrator (OpenRouter) | [`app/ai/`](app/ai) — `orchestrator.py`, `prompts.py`, `schemas.py` |
-| State (in-memory + JSON snapshot) | [`app/state/game_state.py`](app/state/game_state.py) |
-| Content (PCs / monsters / scenario) | [`app/content/`](app/content) |
-| Discord front-end | [`app/discord_bot/`](app/discord_bot) — `bot.py`, `views.py`, `embeds.py` |
-| Web dashboard | [`app/web/`](app/web) + `static/` |
-| Entrypoint | [`app/run.py`](app/run.py) |
+| 判定引擎（真相來源） | [`app/engine/`](app/engine)：`dice.py`, `rules_5e.py`, `combat.py`, `resolution.py`, `types.py` |
+| AI 協調器（OpenRouter） | [`app/ai/`](app/ai)：`orchestrator.py`, `prompts.py`, `schemas.py` |
+| 狀態（記憶體 + JSON 快照） | [`app/state/game_state.py`](app/state/game_state.py) |
+| 內容（PC / 怪物 / 劇本） | [`app/content/`](app/content) |
+| Discord 前端 | [`app/discord_bot/`](app/discord_bot)：`bot.py`, `views.py`, `embeds.py` |
+| 網頁儀表板 | [`app/web/`](app/web) + `static/` |
+| 進入點 | [`app/run.py`](app/run.py) |
 
-The AI **never touches numbers**: intent output is validated against a schema (DC proposals
-are snapped to 5e anchors), and narration only dramatizes an already-computed
-`ResolutionResult`. This is enforced by a guard test in `tests/test_ai.py`.
+AI **絕不碰數字**：意圖輸出會透過 schema 驗證（DC 提案會對齊到 5e 錨點），敘事也只會戲劇化已經計算完成的 `ResolutionResult`。這件事由 `tests/test_ai.py` 裡的防護測試強制保證。
 
 ---
 
-## Setup
+## 設定
 
-### 1. Prerequisites
-- **Python 3.11+** (developed on 3.14).
-- A **Discord bot token** — https://discord.com/developers/applications
-- An **OpenRouter API key** — https://openrouter.ai/keys (optional: it runs in an offline
-  fallback mode without one, with canned narration).
+### 1. 前置需求
 
-### 2. Install
+- **Python 3.11+**（開發環境使用 3.14）。
+- **Discord bot token**：https://discord.com/developers/applications
+- **OpenRouter API key**：https://openrouter.ai/keys （選用；沒有 key 時會以離線 fallback 模式執行，使用預設敘事。）
+
+### 2. 安裝
+
 ```powershell
-python -m pip install -e .            # or: python -m pip install -e ".[dev]" for tests
+python -m pip install -e .            # 或：python -m pip install -e ".[dev]" 以安裝測試工具
 ```
 
-### 3. Configure
-Copy the example env file and fill it in:
+### 3. 設定環境變數
+
+複製範例 env 檔並填入內容：
+
 ```powershell
 Copy-Item .env.example .env
 ```
-Edit `.env`:
-```
-DISCORD_TOKEN=...                     # required to run the bot
-DISCORD_GUILD_ID=...                  # optional: instant slash-command sync to one server
-OPENROUTER_API_KEY=sk-or-...          # omit to run AI in offline/fallback mode
-MODEL_INTENT=openai/gpt-4o-mini       # cheap model: intent parsing (§8.2)
-MODEL_NARRATE=anthropic/claude-3.5-sonnet  # strong model: narration
+
+編輯 `.env`：
+
+```text
+DISCORD_TOKEN=...                     # 執行 bot 必填
+DISCORD_GUILD_ID=...                  # 選填：讓 slash command 立即同步到單一伺服器
+OPENROUTER_API_KEY=sk-or-...          # 省略時會使用離線 / fallback AI 模式
+MODEL_INTENT=openai/gpt-4o-mini       # 便宜模型：意圖解析
+MODEL_NARRATE=anthropic/claude-sonnet-4.5  # 強模型：敘事
 ```
 
-### 4. Discord application setup
-1. Create an application → **Bot** → copy the token into `DISCORD_TOKEN`.
-2. Under **Bot → Privileged Gateway Intents**, enable **MESSAGE CONTENT INTENT**
-   (required for natural-language play).
-3. Invite the bot with the **`bot`** and **`applications.commands`** scopes and permissions
-   to read/send messages and use embeds/buttons in your test channel.
+### 4. Discord application 設定
+
+1. 建立一個 application，進入 **Bot**，把 token 複製到 `DISCORD_TOKEN`。
+2. 在 **Bot -> Privileged Gateway Intents** 底下啟用 **MESSAGE CONTENT INTENT**（自然語言遊玩需要）。
+3. 使用 **`bot`** 與 **`applications.commands`** scopes 邀請 bot，並給予在測試頻道讀取／傳送訊息、使用 embeds／buttons 的權限。
 
 ---
 
-## Run
+## 執行
+
 ```powershell
 python -m app.run
 ```
-- Discord bot connects, and the dashboard serves at **http://127.0.0.1:8000**.
-- Without `DISCORD_TOKEN`, only the dashboard runs (useful for previewing the UI).
 
-### Play (in your Discord channel)
-1. `/start` — begins the adventure and shows the two heroes.
-2. Each of the two players clicks **Play Bram** / **Play Lyra** (or `/join bram` / `/join lyra`).
-3. Once both have joined, the first scene opens. **Just type what you do**, e.g.
-   *“I buy Old Perrin a drink and ask where the caravan was headed.”*
-4. When a check is needed, click the **🎲** button to roll.
-5. Useful slash commands: `/character`, `/scene`, `/roll 1d20+3`, `/next`, `/fight`, `/help`.
+- Discord bot 會連線，儀表板會在 **http://127.0.0.1:8000** 提供服務。
+- 如果沒有 `DISCORD_TOKEN`，只會啟動儀表板（適合預覽 UI）。
 
-Open the dashboard in a browser alongside Discord to watch character HP, the initiative
-tracker, and the adventure log update live.
+### 遊玩（在你的 Discord 頻道中）
+
+1. `/start`：開始冒險並顯示兩名英雄。
+2. 兩位玩家分別點擊 **Play Bram** / **Play Lyra**，或使用 `/join bram` / `/join lyra`。
+3. 兩人都加入後，第一個場景會開啟。**直接輸入你要做什麼**，例如：*我請 Old Perrin 喝一杯，問他商隊往哪裡去了。*
+4. 需要檢定時，點擊**骰子**按鈕擲骰。
+5. 常用 slash commands：`/character`, `/scene`, `/roll 1d20+3`, `/next`, `/fight`, `/help`。
+
+可以在瀏覽器中同時開著儀表板與 Discord，觀看角色 HP、先攻追蹤器與冒險紀錄即時更新。
 
 ---
 
-## Verify without Discord
+## 不透過 Discord 驗證
 
-**Offline end-to-end smoke** (runs the whole pipeline with canned inputs, no Discord, no
-network needed):
+**離線端到端 smoke test**（使用預設輸入跑完整流程，不需要 Discord，也不需要網路）：
+
 ```powershell
 python -m scripts.smoke
 ```
 
-**Tests** (deterministic engine, combat, resolution, the “AI never touches numbers” guard,
-and the dashboard API):
+**測試**（確定性的引擎、戰鬥、判定、AI 不碰數字的防護測試，以及儀表板 API）：
+
 ```powershell
 python -m pytest -q
 ```
 
 ---
 
-## Known MVP simplifications
-- **Single session**, bound to one channel; restart resumes from `save/session.json`.
-- AI context = the last N event-log entries (no RAG / vector memory) — fine for a short
-  one-shot.
-- Combat abstracts positioning/movement and omits reactions & opportunity attacks; monster
-  AI picks a random living target.
-- “Full 5e combat” content covers only what the two pre-made PCs and this scenario need
-  (not the entire PHB).
+## 已知 MVP 簡化
 
-## Tuning knobs
-See `.env` and `app/config.py`: `DICE_SEED` (deterministic dice), `NARRATE_CONTEXT_WINDOW`,
-`AI_OFFLINE`, model IDs, and the web host/port. DC anchors live in `app/engine/rules_5e.py`;
-the scenario and stat blocks live in `app/content/`.
+- **單一 session**，綁定到一個頻道；重啟後會從 `save/session.json` 恢復。
+- AI context = 最近 N 筆 event log（沒有 RAG / vector memory）；對短篇一次性冒險來說足夠。
+- 戰鬥抽象化位置／移動，並省略反應與藉機攻擊；怪物 AI 會隨機選擇一個還活著的目標。
+- 「完整 5e 戰鬥」內容只涵蓋兩名預製 PC 與本劇本需要的部分，並非整本 PHB。
+
+## 可調整項目
+
+請見 `.env` 與 `app/config.py`：`DICE_SEED`（確定性骰子）、`NARRATE_CONTEXT_WINDOW`、`AI_OFFLINE`、模型 ID，以及網頁 host／port。DC 錨點位於 `app/engine/rules_5e.py`；劇本與 stat blocks 位於 `app/content/`。

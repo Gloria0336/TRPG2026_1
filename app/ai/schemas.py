@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..engine.rules_5e import DC_ANCHORS
 
@@ -32,6 +32,13 @@ class IntentParse(BaseModel):
     question: str | None = None              # tier C: one clarifying question
     options: list[str] = Field(default_factory=list)      # tier C: option labels
     suggested_dc: int | None = None          # only used for off-table actions
+
+    # The model often returns `null` for unused list fields (tier A has no candidates,
+    # tier A/B has no options). Coerce nulls to empty lists so validation doesn't fail.
+    @field_validator("candidates", "options", mode="before")
+    @classmethod
+    def _none_to_empty(cls, value: object) -> object:
+        return [] if value is None else value
 
     def snapped_dc(self) -> int | None:
         if self.suggested_dc is None:

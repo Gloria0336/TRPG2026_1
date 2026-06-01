@@ -24,13 +24,13 @@ class RollView(discord.ui.View):
         self.on_roll = on_roll
         self.used = False
 
-    @discord.ui.button(label="Roll", emoji="🎲", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="擲骰", emoji="🎲", style=discord.ButtonStyle.primary)
     async def roll(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.allowed_user_id:
-            await interaction.response.send_message("This isn't your roll to make.", ephemeral=True)
+            await interaction.response.send_message("這不是你的擲骰。", ephemeral=True)
             return
         if self.used:
-            await interaction.response.send_message("That roll has already been made.", ephemeral=True)
+            await interaction.response.send_message("這次擲骰已經完成了。", ephemeral=True)
             return
         self.used = True
         button.disabled = True
@@ -54,10 +54,10 @@ class ChoiceView(discord.ui.View):
     def _make_cb(self, label: str):
         async def _cb(interaction: discord.Interaction):
             if interaction.user.id != self.allowed_user_id:
-                await interaction.response.send_message("These options aren't for you.", ephemeral=True)
+                await interaction.response.send_message("這些選項不是給你的。", ephemeral=True)
                 return
             if self.used:
-                await interaction.response.send_message("You've already chosen.", ephemeral=True)
+                await interaction.response.send_message("你已經選過了。", ephemeral=True)
                 return
             self.used = True
             for child in self.children:

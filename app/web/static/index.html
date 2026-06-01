@@ -1,36 +1,52 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-Hant">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI Living World — Dashboard</title>
+  <title>AI Living World 儀表板</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <header>
-    <h1>🎲 AI Living World <span class="sub">— GM Dashboard</span></h1>
-    <span id="status" class="status offline">connecting…</span>
+    <h1>AI Living World <span class="sub">GM 儀表板</span></h1>
+    <span id="status" class="status offline">連線中...</span>
   </header>
 
   <main>
+    <section class="status-grid">
+      <div class="panel monitor">
+        <h2>AI model 連線</h2>
+        <div class="monitor-row">
+          <span id="ai-status-dot" class="dot offline"></span>
+          <span id="ai-status-text">檢查中...</span>
+        </div>
+        <div id="ai-status-detail" class="monitor-detail"></div>
+      </div>
+
+      <div class="panel monitor">
+        <h2>角色選擇</h2>
+        <div id="player-claims" class="claim-list"></div>
+      </div>
+    </section>
+
     <section id="scene" class="panel scene">
-      <h2 id="scene-title">No active game</h2>
-      <p id="scene-summary" class="muted">Start a session in Discord with <code>/start</code>.</p>
+      <h2 id="scene-title">尚未開始遊戲</h2>
+      <p id="scene-summary" class="muted">在 Discord 使用 <code>/start</code> 開始一場冒險。</p>
       <div id="scene-npcs" class="npcs"></div>
     </section>
 
     <section id="combat" class="panel combat hidden">
-      <h2>⚔️ Combat <span id="combat-round" class="tag"></span></h2>
+      <h2>戰鬥 <span id="combat-round" class="tag"></span></h2>
       <ol id="initiative" class="initiative"></ol>
     </section>
 
     <section class="panel">
-      <h2>Party &amp; NPCs</h2>
+      <h2>隊伍與 NPC</h2>
       <div id="characters" class="cards"></div>
     </section>
 
     <section class="panel log">
-      <h2>📜 Adventure Log</h2>
+      <h2>冒險紀錄</h2>
       <ul id="log" class="log-list"></ul>
     </section>
   </main>

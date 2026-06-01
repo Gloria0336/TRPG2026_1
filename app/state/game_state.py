@@ -67,7 +67,9 @@ class GameState:
         self.pc_ids: list[str] = []
         # Discord user id (str) -> pc id. A player "claims" one of the pre-made PCs.
         self.players: dict[str, str] = {}
-        self.scene: Scene = Scene(id="prelude", title="Prelude", summary="The adventure has not yet begun.")
+        # Discord user id (str) -> display name/nickname shown on the dashboard.
+        self.player_names: dict[str, str] = {}
+        self.scene: Scene = Scene(id="prelude", title="序幕", summary="冒險尚未開始。")
         self.flags: dict[str, object] = {}
         self.event_log: list[Event] = []
         self.combat: CombatState | None = None
@@ -96,15 +98,30 @@ class GameState:
         return [self.characters[i] for i in self.pc_ids if i in self.characters]
 
     # ── player ↔ PC claims ──
-    def claim_pc(self, user_id: str, pc_id: str) -> bool:
+    def claim_pc(self, user_id: str, pc_id: str, display_name: str | None = None) -> bool:
         """Assign a PC to a Discord user. Returns False if the PC is already taken."""
         if pc_id not in self.pc_ids:
             return False
         if pc_id in self.players.values() and self.players.get(user_id) != pc_id:
             return False
         self.players[user_id] = pc_id
+        if display_name:
+            self.player_names[user_id] = display_name
+        order = list(self.flags.get("freeplay_turn_order", []))
+        if pc_id not in order:
+            order.append(pc_id)
+            self.flags["freeplay_turn_order"] = order
         self.bump()
         return True
+
+    def claim_for_pc(self, pc_id: str) -> dict | None:
+        for user_id, claimed_pc_id in self.players.items():
+            if claimed_pc_id == pc_id:
+                return {
+                    "user_id": user_id,
+                    "display_name": self.player_names.get(user_id) or user_id,
+                }
+        return None
 
     def pc_for_user(self, user_id: str) -> Character | None:
         pid = self.players.get(user_id)
@@ -113,6 +130,51 @@ class GameState:
     def unclaimed_pcs(self) -> list[Character]:
         taken = set(self.players.values())
         return [self.characters[i] for i in self.pc_ids if i not in taken]
+
+    # ── non-combat turn order ──
+    def freeplay_turn_order(self) -> list[str]:
+        claimed = set(self.players.values())
+        saved = [pid for pid in self.flags.get("freeplay_turn_order", []) if pid in claimed]
+        missing = [pid for pid in self.pc_ids if pid in claimed and pid not in saved]
+        order = saved + missing
+        if order != self.flags.get("freeplay_turn_order"):
+            self.flags["freeplay_turn_order"] = order
+        return order
+
+    def current_freeplay_actor_id(self) -> str | None:
+        order = self.freeplay_turn_order()
+        if not order:
+            return None
+        index = int(self.flags.get("freeplay_turn_index", 0)) % len(order)
+        return order[index]
+
+    def pending_freeplay_actor_id(self) -> str | None:
+        pending = self.flags.get("pending_freeplay_actor_id")
+        return str(pending) if pending else None
+
+    def begin_freeplay_action(self, actor_id: str) -> None:
+        self.flags["pending_freeplay_actor_id"] = actor_id
+        self.bump()
+
+    def complete_freeplay_action(self, actor_id: str) -> str | None:
+        self.flags.pop("pending_freeplay_actor_id", None)
+        order = self.freeplay_turn_order()
+        if not order:
+            self.bump()
+            return None
+        current = self.current_freeplay_actor_id()
+        if current == actor_id:
+            index = (int(self.flags.get("freeplay_turn_index", 0)) + 1) % len(order)
+            self.flags["freeplay_turn_index"] = index
+            if index == 0:
+                self.flags["freeplay_round"] = int(self.flags.get("freeplay_round", 1)) + 1
+        self.bump()
+        return self.current_freeplay_actor_id()
+
+    def clear_pending_freeplay_action(self) -> None:
+        if "pending_freeplay_actor_id" in self.flags:
+            self.flags.pop("pending_freeplay_actor_id", None)
+            self.bump()
 
     # ── scene / encounter orchestration ──
     def goto_scene(self, scene_def: dict) -> None:
@@ -214,8 +276,17 @@ class GameState:
                     "conditions": c.conditions, "blurb": c.blurb,
                     "abilities": c.abilities,
                     "actions": [a.name for a in c.actions],
+                    "claim": self.claim_for_pc(c.id) if c.is_pc else None,
                 }
                 for c in self.characters.values()
+            ],
+            "players": [
+                {
+                    "user_id": user_id,
+                    "pc_id": pc_id,
+                    "display_name": self.player_names.get(user_id) or user_id,
+                }
+                for user_id, pc_id in self.players.items()
             ],
             "combat": combat,
             "log": [
@@ -233,6 +304,7 @@ class GameState:
             "channel_id": self.channel_id,
             "pc_ids": self.pc_ids,
             "players": self.players,
+            "player_names": self.player_names,
             "characters": {cid: c.to_dict() for cid, c in self.characters.items()},
             "scene": self.scene.to_dict(),
             "flags": self.flags,
@@ -247,9 +319,15 @@ class GameState:
         gs = cls(channel_id=d.get("channel_id"))
         gs.pc_ids = d.get("pc_ids", [])
         gs.players = d.get("players", {})
+        gs.player_names = d.get("player_names", {})
         gs.characters = {cid: Character.from_dict(c) for cid, c in d.get("characters", {}).items()}
         gs.scene = Scene.from_dict(d["scene"]) if d.get("scene") else gs.scene
         gs.flags = d.get("flags", {})
+        # Pending freeplay actions are backed by Discord button callbacks, which
+        # live only in memory. After a restart/load the button can no longer
+        # complete, so keeping this flag would block new /action commands before
+        # they reach the AI intent parser.
+        gs.flags.pop("pending_freeplay_actor_id", None)
         gs.combat = CombatState.from_dict(d["combat"]) if d.get("combat") else None
         gs.started = d.get("started", False)
         gs.event_log = [Event.from_dict(e) for e in d.get("event_log", [])]
@@ -279,7 +357,7 @@ def new_game(channel_id: int | None = None) -> "GameState":
         gs.pc_ids.append(pc.id)
     gs.goto_scene(scenario.first_scene())
     gs.started = True
-    gs.add_system_event("scene", f"A new adventure begins: {scenario.TITLE}")
+    gs.add_system_event("scene", f"新的冒險開始：{scenario.TITLE}")
     return gs
 
 
@@ -294,6 +372,11 @@ def get_state() -> "GameState | None":
 def set_state(state: "GameState | None") -> None:
     global _current
     _current = state
+
+
+def has_active_campaign() -> bool:
+    """Return True when a started campaign has not been marked over."""
+    return bool(_current and _current.started and not _current.flags.get("over"))
 
 
 def reset_state(channel_id: int | None = None) -> "GameState":
