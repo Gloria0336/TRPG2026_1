@@ -489,3 +489,5 @@ options
 00:24:09.572 [INFO ] trpg.ai                | health: online (168 ms)
 00:24:25.620 [DEBUG] trpg.ai                | health: GET https://openrouter.ai/api/v1/models
 00:24:26.002 [INFO ] trpg.ai                | health: online (382 ms)
+00:24:42.050 [DEBUG] trpg.ai                | health: GET https://openrouter.ai/api/v1/models
+00:24:42.206 [INFO ] trpg.ai                | health: online (155 ms)
