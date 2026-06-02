@@ -12,8 +12,12 @@ from dataclasses import dataclass, field
 from ..config import settings
 from ..content import monsters, scenario
 from ..content.characters import premade_pcs
+from ..db import store
 from ..engine.combat import start_combat
 from ..engine.types import Character, CombatState, Event, ResolutionResult
+from ..logging_setup import get_logger
+
+log = get_logger("state")
 
 
 # ───────────────────────── Scene ─────────────────────────
@@ -77,6 +81,10 @@ class GameState:
         # Discord user id (str) -> display name/nickname shown on the dashboard.
         self.player_names: dict[str, str] = {}
         self.scene: Scene = Scene(id="prelude", title="序幕", summary="冒險尚未開始。")
+        # Where the party physically is (design §6: location is first-class state). Kept
+        # in sync with scene.id by goto_scene/goto_location; the canonical scope key for
+        # entity presence and the dynamic scene summary.
+        self.party_location_id: str = self.scene.id
         self.flags: dict[str, object] = {}
         self.event_log: list[Event] = []
         self.combat: CombatState | None = None
@@ -184,14 +192,70 @@ class GameState:
             self.bump()
 
     # ── scene / encounter orchestration ──
+    @property
+    def current_location_id(self) -> str:
+        """Canonical scope key for entities / scene summary. Equals scene.id, but named
+        for what it is: where the party currently is."""
+        return self.party_location_id or self.scene.id
+
     def goto_scene(self, scene_def: dict) -> None:
         # Remove leftover monsters from a previous scene.
         for cid in [c.id for c in self.characters.values() if not c.is_pc]:
             del self.characters[cid]
         self.combat = None
         self.scene = Scene.from_def(scene_def)
+        self.party_location_id = scene_def["id"]
         self.flags["scene_id"] = scene_def["id"]
+        self._mark_visited(scene_def["id"])
+        self._seed_scene_memory(scene_def)
         self.bump()
+
+    def _mark_visited(self, location_id: str) -> None:
+        """Append to the party's visited-locations trail (drives the goal director)."""
+        visited = self.flags.setdefault("visited_locations", [])
+        if location_id not in visited:
+            visited.append(location_id)
+
+    def goto_location(self, location_id: str, *, title: str, summary: str = "") -> None:
+        """Move the party to a free location (entity-backed, not a scripted scene). Unlike
+        goto_scene this is NOT tied to scenario.scene_by_id — it powers natural-language
+        travel so the structured world follows the fiction instead of drifting from it."""
+        for cid in [c.id for c in self.characters.values() if not c.is_pc]:
+            del self.characters[cid]
+        self.combat = None
+        self.scene = Scene(id=location_id, title=title, summary=summary)
+        self.party_location_id = location_id
+        self.flags["scene_id"] = location_id
+        self._mark_visited(location_id)
+        try:
+            store.set_base_summary(location_id, summary)
+        except Exception as exc:  # noqa: BLE001 — memory layer must never break play
+            log.warning("goto_location: DB seed failed (%s): %s", type(exc).__name__, exc)
+        self.bump()
+
+    def _seed_scene_memory(self, scene_def: dict) -> None:
+        """Register the scene's authored entities and base summary in the DB so the
+        narrator reads structured presence/state instead of the static summary."""
+        try:
+            store.seed_entities(scene_def["id"], scene_def.get("entities", []))
+            store.set_base_summary(scene_def["id"], scene_def.get("summary", ""))
+        except Exception as exc:  # noqa: BLE001 — memory layer must never break play
+            log.warning("goto_scene: DB seed failed (%s): %s", type(exc).__name__, exc)
+
+    # ── narrative entities (DB-backed) ──
+    def present_entities(self) -> list[dict]:
+        try:
+            return store.get_present(self.current_location_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("present_entities: DB read failed: %s", exc)
+            return []
+
+    def all_entities(self) -> list[dict]:
+        try:
+            return store.get_all(self.current_location_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("all_entities: DB read failed: %s", exc)
+            return []
 
     def start_scene_combat(self) -> CombatState | None:
         """Spawn the current scene's encounter monsters and roll initiative."""
@@ -212,8 +276,20 @@ class GameState:
     # ── event log ──
     def add_event(self, event: Event) -> Event:
         self.event_log.append(event)
+        self._mirror_event(event)
         self.bump()
         return event
+
+    def _mirror_event(self, event: Event) -> None:
+        """Persist the event to the DB event_log (durable history, incl. prose)."""
+        try:
+            store.insert_event(
+                id=event.id, scene_id=self.scene.id, actor_id=event.actor_id,
+                actor_name=event.actor_name, kind=event.kind, summary=event.summary,
+                narration=event.narration, scope=event.scope, data=event.data, ts=event.ts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("add_event: DB mirror failed (%s): %s", type(exc).__name__, exc)
 
     def add_system_event(self, kind: str, summary: str, narration: str = "") -> Event:
         return self.add_event(Event(actor_id="system", actor_name="GM", kind=kind, summary=summary, narration=narration))
@@ -235,6 +311,10 @@ class GameState:
         for ev in reversed(self.event_log):
             if ev.id == event_id:
                 ev.narration = narration
+                try:
+                    store.update_narration(event_id, narration)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("set_narration: DB update failed: %s", exc)
                 self.bump()
                 return
 
@@ -314,6 +394,7 @@ class GameState:
             "player_names": self.player_names,
             "characters": {cid: c.to_dict() for cid, c in self.characters.items()},
             "scene": self.scene.to_dict(),
+            "party_location_id": self.party_location_id,
             "flags": self.flags,
             "combat": self.combat.to_dict() if self.combat else None,
             "started": self.started,
@@ -329,6 +410,7 @@ class GameState:
         gs.player_names = d.get("player_names", {})
         gs.characters = {cid: Character.from_dict(c) for cid, c in d.get("characters", {}).items()}
         gs.scene = Scene.from_dict(d["scene"]) if d.get("scene") else gs.scene
+        gs.party_location_id = d.get("party_location_id") or gs.scene.id
         gs.flags = d.get("flags", {})
         # Pending freeplay actions are backed by Discord button callbacks, which
         # live only in memory. After a restart/load the button can no longer
@@ -359,6 +441,12 @@ class GameState:
 def new_game(channel_id: int | None = None) -> "GameState":
     """Fresh session: load the two pre-made PCs and the opening scene."""
     gs = GameState(channel_id=channel_id)
+    # Start each campaign from a clean continuity store (entities/history/summaries).
+    try:
+        store.reset_world()
+        store.seed_locations(scenario.LOCATIONS)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("new_game: DB reset/seed failed (%s): %s", type(exc).__name__, exc)
     for pc in premade_pcs():
         gs.characters[pc.id] = pc
         gs.pc_ids.append(pc.id)
@@ -381,9 +469,28 @@ def set_state(state: "GameState | None") -> None:
     _current = state
 
 
+def active_campaign() -> "GameState | None":
+    """Return the active campaign, even if its Discord channel binding is stale."""
+    if _current and _current.started and not _current.flags.get("over"):
+        return _current
+    return None
+
+
 def has_active_campaign() -> bool:
     """Return True when a started campaign has not been marked over."""
-    return bool(_current and _current.started and not _current.flags.get("over"))
+    return active_campaign() is not None
+
+
+def has_discord_channel_binding(state: "GameState | None") -> bool:
+    """Discord channel snowflakes are positive ints; 0/None means an unbound snapshot."""
+    return isinstance(getattr(state, "channel_id", None), int) and state.channel_id > 0
+
+
+def active_campaign_for_channel(channel_id: int) -> "GameState | None":
+    gs = active_campaign()
+    if gs and gs.channel_id == channel_id:
+        return gs
+    return None
 
 
 def reset_state(channel_id: int | None = None) -> "GameState":

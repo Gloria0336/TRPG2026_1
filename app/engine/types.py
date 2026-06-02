@@ -147,6 +147,9 @@ class Character:
     death_failures: int = 0
     portrait: str = "🧝"                        # emoji shown in embeds/dashboard
     blurb: str = ""                             # one-line flavour for onboarding
+    # Carried items (free-text). Read by the intent parser so a player can't conjure gear
+    # they don't have (design: AI never invents facts). Not a full PF2e inventory yet.
+    inventory: list[str] = field(default_factory=list)
 
     # ── derived helpers ──
     def mod(self, ability: Ability | str) -> int:
@@ -230,9 +233,16 @@ class Intent:
     target: str | None = None          # free-text target reference
     approach: str | None = None        # skill / action name driving the check
     is_attack: bool = False            # True if the player is attempting to attack/fight
+    # Tier-A only: True (default) → roll a d20 check; False → trivial/uncontested beat
+    # resolved without a roll. The engine gate (resolution.requires_check) is the final
+    # arbiter and may force this back to True (design §8.3).
+    needs_check: bool = True
     candidates: list[str] = field(default_factory=list)  # tier B: candidate approaches
     question: str | None = None        # tier C: clarifying question
     options: list[str] = field(default_factory=list)     # tier C: option labels
+    # True when the message rests on a false premise (gear the actor lacks / a fact not in
+    # the scene). The bot redirects in-world instead of resolving or offering a menu.
+    implausible: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)

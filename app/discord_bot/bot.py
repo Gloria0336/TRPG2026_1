@@ -1,4 +1,4 @@
-"""Discord bot: natural-language play, slash commands, and dice-button flow."""
+"""Discord bot: slash commands and dice-button flow."""
 from __future__ import annotations
 
 import asyncio
@@ -9,27 +9,29 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..ai import orchestrator
+from ..ai import orchestrator, prompts
 from ..config import settings
-from ..content import scenario
+from ..content import director, scenario
+from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
 from ..engine.types import IntentTier
 from ..logging_setup import get_logger
 from ..state import game_state
-from . import embeds, i18n
+from . import dice_animations, embeds, i18n
 from .views import ChoiceView, RollView
 
 log = get_logger("bot")
 
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = False
 
 bot = commands.Bot(command_prefix="!trpg ", intents=intents, help_command=None)
 
 
 @bot.event
 async def on_ready():
+    store.init_db()
     if game_state.get_state() is None:
         saved = game_state.GameState.load()
         if saved:
@@ -50,10 +52,33 @@ async def on_ready():
 
 
 def _state_for_channel(channel_id: int) -> game_state.GameState | None:
-    gs = game_state.get_state()
-    if gs and gs.started and gs.channel_id == channel_id and not gs.flags.get("over"):
-        return gs
-    return None
+    return game_state.active_campaign_for_channel(channel_id)
+
+
+def _channel_ref(channel_id: int | None) -> str:
+    return f"<#{channel_id}>" if isinstance(channel_id, int) and channel_id > 0 else "未知頻道"
+
+
+def _start_block_message(channel_id: int) -> str | None:
+    gs = game_state.active_campaign()
+    if gs is None or not game_state.has_discord_channel_binding(gs):
+        return None
+    if gs.channel_id == channel_id:
+        return "這個頻道已經有正在進行的戰役，不能再次使用 `/start`。"
+    return f"目前已經有正在進行的戰役（{_channel_ref(gs.channel_id)}），請先到該頻道完成或結束該戰役後再使用 `/start`。"
+
+
+def _finish_target_for_channel(channel_id: int) -> tuple[game_state.GameState | None, str | None]:
+    gs = game_state.active_campaign_for_channel(channel_id)
+    if gs:
+        return gs, None
+
+    gs = game_state.active_campaign()
+    if gs is None:
+        return None, "這裡目前沒有進行中的戰役。"
+    if not game_state.has_discord_channel_binding(gs):
+        return gs, None
+    return None, f"目前戰役綁定在 {_channel_ref(gs.channel_id)}，請到該頻道使用 `/finish`。"
 
 
 def _mention_for(gs: game_state.GameState, actor_id: str) -> str | None:
@@ -74,11 +99,69 @@ async def _persist(gs: game_state.GameState) -> None:
         pass
 
 
+async def _send_dice_animation(channel, natural: int | None) -> None:
+    if natural is None:
+        return
+    file = dice_animations.animation_file(natural)
+    if file is None:
+        log.warning(
+            "dice animation missing: set_id=%s natural=%s",
+            dice_animations.ACTIVE_DICE_ANIMATION_SET_ID,
+            natural,
+        )
+        return
+    await channel.send(file=file)
+
+
 async def _narrate_into_log(gs: game_state.GameState, result) -> str:
     prose = await orchestrator.narrate(gs, result)
     if gs.event_log:
         gs.set_narration(gs.event_log[-1].id, prose)
+    await _apply_entity_updates(gs, prose, result)
     return prose
+
+
+async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) -> None:
+    """After each narration: pull entity-state deltas (LLM extraction, offline-safe)
+    and apply them, then recompute the dynamic scene summary so the next turn reads
+    current presence/state instead of the static blurb."""
+    scope = gs.current_location_id
+    threshold = settings.mention_promote_threshold
+    try:
+        extraction = await orchestrator.extract_entity_states(gs, prose, result)
+        for delta in extraction.actionable():
+            d = delta.model_dump()
+            ref = d.get("entity_ref") or d.get("register_name")
+            existing = store.find_by_ref(scope, ref) if ref else None
+            # A brand-new entity the AI just invented in prose → debounce: only promote
+            # after it has been named `threshold` times (design: prevent drift-by-bloat
+            # AND prevent the world snapping back by never recording it). Updates to an
+            # entity that already exists stay immediate.
+            if existing is None and d.get("register_kind"):
+                name = d.get("register_name") or d.get("entity_ref")
+                kind = d.get("register_kind")
+                count = store.record_mention(scope, name, kind)
+                if count == 0:
+                    continue  # already a registered entity/location elsewhere
+                if count >= threshold:
+                    ent_id = store.promote_mention(scope, name, kind)
+                    log.info("entity promoted after %d mention(s): scope=%s name=%s kind=%s id=%s",
+                             count, scope, name, kind, ent_id)
+                else:
+                    log.info("entity mention tallied (%d/%d): scope=%s name=%s kind=%s",
+                             count, threshold, scope, name, kind)
+                continue
+            ent_id = store.apply_delta(scope, d)
+            if ent_id:
+                log.info("entity delta applied: scope=%s entity=%s %s",
+                         scope, ent_id, delta.model_dump(exclude_none=True))
+    except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
+        log.warning("entity update failed (%s): %s", type(exc).__name__, exc)
+    try:
+        store.set_current_summary(scope, prompts.compose_scene_summary(gs))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("scene summary refresh failed (%s): %s", type(exc).__name__, exc)
+    gs.bump()
 
 
 def _action_from_display(pc, label: str) -> str:
@@ -129,18 +212,7 @@ async def _ensure_freeplay_turn(channel, gs: game_state.GameState, pc, user, con
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot or not message.content:
-        return
-    if message.content.startswith(bot.command_prefix):
-        await bot.process_commands(message)
-        return
-    gs = _state_for_channel(message.channel.id)
-    if gs is None:
-        return
-    pc = gs.pc_for_user(str(message.author.id))
-    if pc is None:
-        return
-    await process_action(message.channel, message.author, pc.id, message.content)
+    return
 
 
 async def process_action(channel, user, actor_id: str, text: str, continue_pending: bool = False) -> None:
@@ -175,8 +247,16 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
     async with channel.typing():
         intent, proposed_dc = await orchestrator.interpret(gs, actor_id, text)
 
-    log.info("process_action: dispatch intent.tier=%s action=%s target=%s approach=%s is_attack=%s proposed_dc=%s",
-             intent.tier.value, intent.action, intent.target, intent.approach, intent.is_attack, proposed_dc)
+    log.info("process_action: dispatch intent.tier=%s action=%s target=%s approach=%s is_attack=%s implausible=%s proposed_dc=%s",
+             intent.tier.value, intent.action, intent.target, intent.approach, intent.is_attack, intent.implausible, proposed_dc)
+
+    # False-premise guard (design §8.3 anti-talk): a message relying on gear the actor
+    # lacks or a fact not in the scene gets an in-world redirect, NOT a menu that would
+    # legitimise it. Does not consume the turn — the player can immediately try again.
+    if intent.implausible:
+        log.info("process_action → implausible redirect (action=%s target=%s)", intent.action, intent.target)
+        await _send_implausible_redirect(channel, user, gs, pc, intent)
+        return
 
     if intent.tier is IntentTier.B and intent.candidates:
         label_map = {i18n.text(x): x for x in intent.candidates}
@@ -211,13 +291,19 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
     if in_combat:
         log.info("process_action → _combat_declare")
         await _combat_declare(channel, user, gs, pc, intent, text)
+    elif intent.action == "travel" and intent.target:
+        log.info("process_action → _begin_travel target=%s", intent.target)
+        await _begin_travel(channel, user, gs, pc, intent)
     elif intent.is_attack and scenario.scene_by_id(gs.scene.id) and scenario.scene_by_id(gs.scene.id).get("encounter"):
         log.info("process_action → _begin_scene_combat (attack triggered encounter)")
         gs.clear_pending_freeplay_action()
         await _begin_scene_combat(channel, gs)
-    else:
+    elif intent.needs_check:
         log.info("process_action → _begin_check (out-of-combat check)")
         await _begin_check(channel, user, gs, pc, intent, proposed_dc)
+    else:
+        log.info("process_action → _begin_narrative (trivial no-roll beat)")
+        await _begin_narrative(channel, user, gs, pc, intent)
 
 
 async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
@@ -260,9 +346,10 @@ async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
     async def on_roll(interaction: discord.Interaction):
         log.info("_begin_check.on_roll: pc=%s helpers=%s rolling check", pc.name, view.helpers)
         result = resolution.resolve(gs, intent, proposed_dc=proposed_dc, helpers=list(view.helpers))
-        await interaction.response.edit_message(embed=embeds.result_embed(result), view=None)
+        await interaction.response.edit_message(content="🎲 擲骰中...", embed=None, view=None)
+        await _send_dice_animation(channel, result.natural)
         prose = await _narrate_into_log(gs, result)
-        await interaction.edit_original_response(embed=embeds.result_embed(result, prose))
+        await interaction.edit_original_response(content=None, embed=embeds.result_embed(result, prose))
         gs.complete_freeplay_action(pc.id)
         await _persist(gs)
         await _maybe_resolve_climax(channel, gs, result)
@@ -273,6 +360,65 @@ async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
     gs.begin_freeplay_action(pc.id)
     await _persist(gs)
     await channel.send(embed=embeds.roll_prompt_embed(pc, label, dc), view=view)
+
+
+async def _begin_narrative(channel, user, gs, pc, intent) -> None:
+    """Trivial / uncontested Tier-A action (design §8.2): no roll, just narrate the beat
+    and advance the turn. The engine gate (resolution.requires_check) has already
+    confirmed nothing is at stake here."""
+    summary = intent.raw_text or intent.action or "敘事節拍"
+    gs.begin_freeplay_action(pc.id)
+    await _persist(gs)
+    async with channel.typing():
+        result = resolution.narrative_beat(
+            gs, pc, summary, target_name=intent.target, raw_text=intent.raw_text,
+        )
+        prose = await _narrate_into_log(gs, result)
+    await channel.send(embed=embeds.result_embed(result, prose))
+    gs.complete_freeplay_action(pc.id)
+    await _track_story(channel, gs)
+    await _send_freeplay_turn_prompt(channel, gs)
+
+
+async def _send_implausible_redirect(channel, user, gs, pc, intent) -> None:
+    """The message leaned on a false premise (gear the actor doesn't carry, or a fact not
+    in the scene). Redirect in-world instead of offering a menu that legitimises it."""
+    tgt = i18n.text(intent.target) if intent.target else None
+    if tgt:
+        msg = (f"⚠️ {user.mention}，{i18n.name(pc.name)} 身上並沒有能做到這件事的裝備或條件。"
+               f"你想改用什麼方式處理「{tgt}」？（說出一個可行的做法）")
+    else:
+        msg = (f"⚠️ {user.mention}，這個行動依目前的處境無法成立"
+               f"（你並沒有相關的裝備，現場也沒有這樣的條件）。換個可行的做法試試？")
+    await channel.send(msg)
+
+
+async def _begin_travel(channel, user, gs, pc, intent) -> None:
+    """Free travel (design: location is first-class state). Resolve/register the
+    destination as a location entity, move the party there, then open it — so the
+    structured scene follows the fiction instead of being left behind in the tavern."""
+    loc = None
+    try:
+        loc = store.resolve_or_register_location(intent.target)
+    except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
+        log.warning("_begin_travel: resolve location failed (%s): %s", type(exc).__name__, exc)
+    if loc is None:
+        # Couldn't pin a destination — fall back to a plain no-roll beat.
+        await _begin_narrative(channel, user, gs, pc, intent)
+        return
+    log.info("_begin_travel: %s → location id=%s name=%s", pc.name, loc["id"], loc["name"])
+    gs.clear_pending_freeplay_action()
+    # Authored place → re-enter the scripted scene (keeps its challenges/encounter/entities);
+    # emergent place → free location beat.
+    scene_def = scenario.scene_by_id(loc["id"])
+    if scene_def:
+        gs.goto_scene(scene_def)
+    else:
+        gs.goto_location(loc["id"], title=loc["name"], summary=loc.get("notes") or "")
+    await _persist(gs)
+    await _open_current_scene(channel, gs)
+    if not (gs.combat and gs.combat.active):
+        await _track_story(channel, gs)
 
 
 async def _begin_scene_combat(channel, gs) -> None:
@@ -359,9 +505,10 @@ async def _resolve_combat_action(channel, user, gs, pc, action_name, target_ref,
         except CombatError as exc:
             await interaction.response.edit_message(content=f"⚠️ {i18n.text(str(exc))}", embed=None, view=None)
             return
-        await interaction.response.edit_message(embed=embeds.result_embed(result), view=None)
+        await interaction.response.edit_message(content="🎲 擲骰中...", embed=None, view=None)
+        await _send_dice_animation(channel, result.natural)
         prose = await _narrate_into_log(gs, result)
-        await interaction.edit_original_response(embed=embeds.result_embed(result, prose))
+        await interaction.edit_original_response(content=None, embed=embeds.result_embed(result, prose))
         await _persist(gs)
         if allow_bonus and gs.combat and gs.combat.active:
             await _prompt_bonus_or_end(channel, user, gs, pc)
@@ -415,8 +562,10 @@ async def _progress_combat(channel, gs) -> None:
             if owner_id:
                 async def on_roll(interaction: discord.Interaction, _aid=actor.id):
                     result = combat.take_death_save(gs, _aid)
+                    await interaction.response.edit_message(content="🎲 擲骰中...", embed=None, view=None)
+                    await _send_dice_animation(channel, result.natural)
                     prose = await _narrate_into_log(gs, result)
-                    await interaction.response.edit_message(embed=embeds.result_embed(result, prose), view=None)
+                    await interaction.edit_original_response(content=None, embed=embeds.result_embed(result, prose), view=None)
                     combat.advance_turn(gs)
                     await _persist(gs)
                     await _progress_combat(channel, gs)
@@ -424,12 +573,14 @@ async def _progress_combat(channel, gs) -> None:
                 await channel.send(embed=embeds.turn_prompt_embed(actor, mention), view=RollView(owner_id, on_roll))
                 return
             result = combat.take_death_save(gs, actor.id)
+            await _send_dice_animation(channel, result.natural)
             prose = await _narrate_into_log(gs, result)
             await channel.send(embed=embeds.result_embed(result, prose))
             combat.advance_turn(gs)
             continue
         results = combat.run_monster_turn(gs)
         for result in results:
+            await _send_dice_animation(channel, result.natural)
             prose = await _narrate_into_log(gs, result)
             await channel.send(embed=embeds.result_embed(result, prose))
         combat.advance_turn(gs)
@@ -444,15 +595,45 @@ async def _after_combat(channel, gs, outcome: str) -> None:
     if outcome == "defeat":
         await _end_game(channel, gs, scenario.ENDINGS["defeat"])
         return
+    # Winning the boss fight completes the climax beat.
     if gs.scene.id == "warren":
-        await _end_game(channel, gs, scenario.ENDINGS["victory"])
+        gs.flags["climax_resolved"] = True
+    # Goal-driven, not the linear next_scene rail: end on the terminal beat, otherwise
+    # return to free play and let the players choose where to go (with a nudge).
+    await _advance_story(channel, gs, win_ending=scenario.ENDINGS["victory"])
+
+
+async def _advance_story(channel, gs, *, win_ending: str) -> None:
+    """Goal director progression (replaces scenario.next_scene). Ends the one-shot when the
+    terminal beat is met; else announces fresh progress, nudges toward the active beat, and
+    hands the turn back — the party is never dragged into the next scripted scene."""
+    progress = director.record(gs)
+    if progress["all_done"]:
+        await _end_game(channel, gs, win_ending)
         return
-    nxt = scenario.next_scene(gs.scene.id)
-    if nxt is None:
-        await _end_game(channel, gs, scenario.ENDINGS["victory"])
-        return
-    gs.goto_scene(nxt)
-    await _open_current_scene(channel, gs)
+    for gid in progress["newly_done"]:
+        title = next((g["title"] for g in scenario.GOALS if g["id"] == gid), gid)
+        await channel.send(f"✅ 進展：**{title}**")
+    active = progress["active"]
+    if active and active.get("nudge"):
+        await channel.send(f"🧭 {active['nudge']}")
+    await _persist(gs)
+    await _send_freeplay_turn_prompt(channel, gs)
+
+
+async def _track_story(channel, gs) -> None:
+    """After a non-combat beat (travel / exploration): fold the new world state into the
+    goal director, announce any beat just completed, and nudge if the table has stalled."""
+    progress = director.record(gs)
+    for gid in progress["newly_done"]:
+        title = next((g["title"] for g in scenario.GOALS if g["id"] == gid), gid)
+        await channel.send(f"✅ 進展：**{title}**")
+    if not progress["newly_done"]:
+        director.note_beat(gs)
+    hint = director.nudge_if_stalled(gs)
+    if hint:
+        await channel.send(f"🧭 {hint}")
+    await _persist(gs)
 
 
 async def _maybe_resolve_climax(channel, gs, result) -> None:
@@ -461,6 +642,7 @@ async def _maybe_resolve_climax(channel, gs, result) -> None:
     social = {"persuasion", "intimidation", "stealth", "deception"}
     summ = result.summary.lower()
     if result.success and any(s in summ for s in social):
+        gs.flags["climax_resolved"] = True
         await _end_game(channel, gs, scenario.ENDINGS["peaceful"])
     elif result.success is False and any(s in summ for s in social):
         await channel.send("葛利克斯低吼一聲，談判破裂。哥布林們撲上前攻擊！")
@@ -489,14 +671,17 @@ async def _end_game(channel, gs, ending: str) -> None:
 
 @bot.tree.command(description="在此頻道開始新的冒險。")
 async def start(interaction: discord.Interaction):
-    if game_state.has_active_campaign():
-        gs = game_state.get_state()
-        if gs and gs.channel_id == interaction.channel_id:
-            msg = "這個頻道已經有正在進行的戰役，不能再次使用 `/start`。"
-        else:
-            msg = "目前已經有正在進行的戰役，請先完成或結束該戰役後再使用 `/start`。"
+    msg = _start_block_message(interaction.channel_id)
+    if msg:
         await interaction.response.send_message(msg, ephemeral=True)
         return
+
+    previous = game_state.active_campaign()
+    if previous and not game_state.has_discord_channel_binding(previous):
+        log.warning(
+            "/start: replacing active campaign without Discord channel binding (channel_id=%s)",
+            previous.channel_id,
+        )
     gs = game_state.reset_state(channel_id=interaction.channel_id)
     await interaction.response.send_message(embed=embeds.intro_embed())
     await interaction.followup.send(embed=embeds.roster_embed(gs), view=_join_view(interaction.channel))
@@ -609,7 +794,13 @@ async def roll(interaction: discord.Interaction, notation: str = "1d20"):
     except ValueError as exc:
         await interaction.response.send_message(f"⚠️ {i18n.text(str(exc))}", ephemeral=True)
         return
-    await interaction.response.send_message(f"🎲 `{i18n.text(r.breakdown())}`")
+    file = None
+    if r.notation.startswith("1d20") and len(r.rolls) == 1:
+        file = dice_animations.animation_file(r.rolls[0])
+    if file:
+        await interaction.response.send_message(f"🎲 `{i18n.text(r.breakdown())}`", file=file)
+    else:
+        await interaction.response.send_message(f"🎲 `{i18n.text(r.breakdown())}`")
 
 
 @bot.tree.command(description="前往下一個場景（跳過目前段落）。")
@@ -645,16 +836,20 @@ async def fight(interaction: discord.Interaction):
 
 @bot.tree.command(description="強制結束目前戰役。")
 async def finish(interaction: discord.Interaction):
-    gs = _state_for_channel(interaction.channel_id)
+    gs, msg = _finish_target_for_channel(interaction.channel_id)
     if gs is None:
-        await interaction.response.send_message("這裡目前沒有進行中的戰役。", ephemeral=True)
+        await interaction.response.send_message(msg or "這裡目前沒有進行中的戰役。", ephemeral=True)
         return
+    was_unbound = not game_state.has_discord_channel_binding(gs)
     gs.flags["over"] = True
     gs.clear_pending_freeplay_action()
     gs.combat = None
     gs.add_system_event("scene", "戰役被強制結束。", f"{interaction.user.display_name} 使用 /finish 結束了戰役。")
     await _persist(gs)
-    await interaction.response.send_message("🛑 已強制結束戰役。現在可以再次使用 `/start`。")
+    if was_unbound:
+        await interaction.response.send_message("🛑 已清除沒有 Discord 頻道綁定的舊戰役。現在可以再次使用 `/start`。")
+    else:
+        await interaction.response.send_message("🛑 已強制結束戰役。現在可以再次使用 `/start`。")
 
 
 @bot.tree.command(description="重新啟動機器人程序並重新讀取程式內容。")

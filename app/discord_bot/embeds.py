@@ -19,7 +19,7 @@ AMBER = discord.Color.orange()
 def intro_embed() -> discord.Embed:
     e = discord.Embed(title=f"🎲 {scenario.TITLE}", description=scenario.INTRO, color=GOLD)
     e.add_field(name="玩法說明", value=scenario.HOW_TO_PLAY, inline=False)
-    e.set_footer(text="使用 /join 選擇角色，接著直接輸入你想做的事。")
+    e.set_footer(text="使用 /join 選擇角色，接著用 /action 宣告你想做的事。")
     return e
 
 

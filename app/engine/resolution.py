@@ -54,6 +54,37 @@ APPROACH_SYNONYMS: dict[str, str] = {
 }
 
 
+# Skills that are inherently opposed/risky: even when the player frames the action as
+# casual ("I just calmly walk past the guard"), these always resolve against a DC so a
+# narrative claim can never become a free success (design §8.3 anti-talk protection).
+CONTESTED_SKILLS: frozenset[str] = frozenset({
+    "stealth", "deception", "persuasion", "intimidation", "sleight_of_hand",
+})
+
+
+def requires_check(state: "GameState", intent: Intent) -> bool:
+    """Engine gate over the parser's `needs_check` proposal (design §8.3).
+
+    Returns True when the action MUST roll regardless of what the AI proposed — i.e.
+    the action is an attack, uses a contested skill, hits a scene-authored challenge,
+    or targets a wary/afraid/hostile entity. Trivial, uncontested beats return False
+    and may be narrated without a roll.
+    """
+    if intent.is_attack:
+        return True
+    skill = normalize_approach(intent.approach or intent.action)
+    if skill in CONTESTED_SKILLS:
+        return True
+    if skill in state.scene.challenges:        # the scene author flagged a DC here
+        return True
+    if intent.target:
+        from ..db import store
+        ent = store.find_by_ref(state.scene.id, intent.target)
+        if ent and ent.get("disposition") in ("wary", "afraid", "hostile"):
+            return True
+    return False
+
+
 def normalize_approach(approach: str | None) -> str:
     """Best-effort map an approach string to a 5e skill key."""
     if not approach:
@@ -282,13 +313,26 @@ def resolve(
     return result
 
 
-def narrative_beat(state: "GameState", actor: Character, summary: str, hint: str = "") -> ResolutionResult:
-    """A no-roll beat (utility action, scene transition). Still produces a logged result."""
+def narrative_beat(
+    state: "GameState",
+    actor: Character,
+    summary: str,
+    *,
+    target_name: str | None = None,
+    raw_text: str = "",
+    hint: str = "",
+) -> ResolutionResult:
+    """A no-roll beat for a trivial/uncontested Tier-A action (design §8.2). Still
+    produces a logged result so the dashboard, event log, and RAG layer see it — there
+    is just no d20 and no success/failure band. `target_name`/`raw_text` are set before
+    logging so the narrator (and history) know what the actor addressed."""
     result = ResolutionResult(
         kind=ResultKind.NARRATIVE,
         actor_id=actor.id,
         actor_name=actor.name,
         summary=summary,
+        target_name=target_name,
+        raw_text=raw_text,
         narration_hint=hint or "Describe the moment vividly but briefly.",
     )
     state.log_result(result)

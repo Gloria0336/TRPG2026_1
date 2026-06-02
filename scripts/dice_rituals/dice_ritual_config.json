@@ -1,0 +1,70 @@
+{
+  "active_dice_set_id": "obsidian_gold",
+  "dice_sets": {
+    "obsidian_gold": {
+      "name": "Obsidian Gold",
+      "caption": "DISCORD DICE RITUAL",
+      "background_top": [5, 5, 8],
+      "background_bottom": [18, 13, 12],
+      "die_fill": [24, 19, 13],
+      "die_text": [255, 240, 177],
+      "bright": [255, 245, 185],
+      "text_primary": [255, 229, 151],
+      "text_secondary": [202, 167, 94],
+      "accent_bias": [255, 206, 93],
+      "spark_bias": [255, 245, 191]
+    },
+    "blood_iron": {
+      "name": "Blood Iron",
+      "caption": "BLOOD IRON D20",
+      "background_top": [10, 4, 5],
+      "background_bottom": [28, 11, 10],
+      "die_fill": [31, 18, 17],
+      "die_text": [255, 205, 171],
+      "bright": [255, 220, 177],
+      "text_primary": [255, 204, 169],
+      "text_secondary": [210, 106, 88],
+      "accent_bias": [226, 67, 55],
+      "spark_bias": [255, 190, 130]
+    },
+    "arcane_violet": {
+      "name": "Arcane Violet",
+      "caption": "ARCANE D20 RITE",
+      "background_top": [5, 4, 12],
+      "background_bottom": [18, 11, 30],
+      "die_fill": [20, 16, 34],
+      "die_text": [233, 217, 255],
+      "bright": [235, 218, 255],
+      "text_primary": [231, 213, 255],
+      "text_secondary": [180, 138, 225],
+      "accent_bias": [171, 111, 255],
+      "spark_bias": [230, 207, 255]
+    },
+    "emerald_oath": {
+      "name": "Emerald Oath",
+      "caption": "EMERALD OATH D20",
+      "background_top": [3, 8, 7],
+      "background_bottom": [10, 28, 20],
+      "die_fill": [12, 27, 22],
+      "die_text": [205, 255, 220],
+      "bright": [222, 255, 221],
+      "text_primary": [219, 255, 208],
+      "text_secondary": [128, 201, 144],
+      "accent_bias": [79, 217, 133],
+      "spark_bias": [211, 255, 213]
+    },
+    "frost_moon": {
+      "name": "Frost Moon",
+      "caption": "FROST MOON D20",
+      "background_top": [5, 8, 14],
+      "background_bottom": [12, 22, 32],
+      "die_fill": [17, 25, 34],
+      "die_text": [221, 243, 255],
+      "bright": [232, 249, 255],
+      "text_primary": [220, 242, 255],
+      "text_secondary": [143, 186, 212],
+      "accent_bias": [110, 205, 244],
+      "spark_bias": [219, 245, 255]
+    }
+  }
+}

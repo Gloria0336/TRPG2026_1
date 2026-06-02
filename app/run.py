@@ -14,10 +14,12 @@ import uvicorn
 from .ai import orchestrator
 from .config import settings
 from .logging_setup import close_logging, get_logger, setup_logging
+from .single_instance import AlreadyRunningError, acquire as acquire_instance_lock
 
 setup_logging()
 log = get_logger("run")
 
+from .db import store
 from .discord_bot.bot import bot
 from .state import game_state
 from .web.app import app as web_app
@@ -36,7 +38,21 @@ async def _serve_web() -> None:
 
 
 async def main() -> None:
-    # Resume a saved session so the dashboard isn't blank on restart (no DB).
+    # Refuse to start a second instance: two bots on one token fight over the
+    # gateway session, so player actions get split between processes and the
+    # trace file of the instance you're watching looks empty.
+    try:
+        acquire_instance_lock()
+    except AlreadyRunningError as exc:
+        log.error("another app instance is already running (pid=%s) — refusing to start a duplicate. "
+                  "Stop it first, or check that you didn't launch the app twice.", exc.pid)
+        print(f"\n[run] 已有另一個實例在執行中 (pid={exc.pid})，拒絕重複啟動。請先關閉它再重跑。")
+        return
+
+    # Open the SQLite memory store (entities / event history / dynamic summaries).
+    store.init_db()
+
+    # Resume a saved session so the dashboard isn't blank on restart.
     if game_state.get_state() is None:
         saved = game_state.GameState.load()
         if saved:

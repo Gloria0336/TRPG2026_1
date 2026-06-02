@@ -13,8 +13,8 @@ Use levels deliberately:
 from __future__ import annotations
 
 import atexit
-from datetime import datetime
 import logging
+import logging.handlers
 import os
 import sys
 from pathlib import Path
@@ -24,7 +24,10 @@ from .config import ROOT_DIR
 LOG_DIR = ROOT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-TRACE_FILE_PREFIX = "trace"
+# One stable file so you always open the same trace.log. Runs accumulate here
+# (each run is delimited by a "logger initialized" line); the rotating handler
+# caps total size so it never grows unbounded.
+TRACE_FILE = LOG_DIR / "trace.log"
 
 _initialized = False
 _closed = False
@@ -32,13 +35,8 @@ _trace_file: Path | None = None
 _console_ctrl_handler: object | None = None
 
 
-def _new_trace_file() -> Path:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    return LOG_DIR / f"{TRACE_FILE_PREFIX}_{stamp}_{os.getpid()}.log"
-
-
 def current_trace_file() -> Path | None:
-    """Return the per-run trace file after logging has been initialized."""
+    """Return the trace file path after logging has been initialized."""
     return _trace_file
 
 
@@ -75,14 +73,16 @@ def setup_logging(console_level: int = logging.INFO, file_level: int = logging.D
         return
 
     _closed = False
-    _trace_file = _new_trace_file()
+    _trace_file = TRACE_FILE
 
     fmt = logging.Formatter(
         fmt="%(asctime)s.%(msecs)03d [%(levelname)-5s] %(name)-22s | %(message)s",
         datefmt="%H:%M:%S",
     )
 
-    file_handler = logging.FileHandler(_trace_file, mode="w", encoding="utf-8")
+    file_handler = logging.handlers.RotatingFileHandler(
+        _trace_file, maxBytes=4_000_000, backupCount=5, encoding="utf-8"
+    )
     file_handler.setLevel(file_level)
     file_handler.setFormatter(fmt)
 

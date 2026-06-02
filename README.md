@@ -22,7 +22,7 @@
 因為沒有資料庫用來共享狀態，Discord bot 與 FastAPI 儀表板會在**同一個 Python 程序、同一個 asyncio loop** 中執行，並共享同一個記憶體內 `GameState` 物件（MVP 中將原設計簡化為單體架構）。
 
 ```text
-Discord 自然語言 -> [AI] 意圖解析（便宜模型）-> A/B/C 分級
+Discord `/action` 自然語言 -> [AI] 意圖解析（便宜模型）-> A/B/C 分級
    A -> engine 執行判定 -> 骰子按鈕 -> 伺服器擲骰 -> 揭示結果 -> [AI] 敘事（強模型）
    B -> 方法按鈕 -> 玩家選擇 -> (A)
    C -> 釐清按鈕 -> 玩家選擇 -> (A)
@@ -79,7 +79,7 @@ MODEL_NARRATE=anthropic/claude-sonnet-4.5  # 強模型：敘事
 ### 4. Discord application 設定
 
 1. 建立一個 application，進入 **Bot**，把 token 複製到 `DISCORD_TOKEN`。
-2. 在 **Bot -> Privileged Gateway Intents** 底下啟用 **MESSAGE CONTENT INTENT**（自然語言遊玩需要）。
+2. 不需要啟用 **MESSAGE CONTENT INTENT**；玩家動作只透過 slash command `/action` 送出。
 3. 使用 **`bot`** 與 **`applications.commands`** scopes 邀請 bot，並給予在測試頻道讀取／傳送訊息、使用 embeds／buttons 的權限。
 
 ---
@@ -115,11 +115,51 @@ python -m app.run
 - Discord bot 會連線，儀表板會在 **http://127.0.0.1:8000** 提供服務。
 - 如果沒有 `DISCORD_TOKEN`，只會啟動儀表板（適合預覽 UI）。
 
+### 正確關閉與「重複啟動」處理
+
+這個專案一次只能跑一個 `python -m app.run`。Discord bot 和 Web dashboard 共用同一個 in-memory `GameState`，如果開兩個程序，它們會搶同一個 Discord token 和 `8000` port，所以第二個程序會拒絕啟動並顯示「已有另一個實例在執行中」。
+
+正常關閉方式：
+
+```powershell
+Ctrl+C
+```
+
+請在啟動 `python -m app.run` 的那個 PowerShell 視窗按 `Ctrl+C`。看到類似下面的訊息，就代表正常關閉：
+
+```text
+[run] shutting down.
+```
+
+如果已經找不到原本啟動的視窗，先看目前鎖檔記錄的 PID：
+
+```powershell
+Get-Content logs\app.lock
+```
+
+再確認該 PID 是不是這個專案：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "ProcessId=<PID>" | Select-Object ProcessId,CommandLine
+```
+
+如果 `CommandLine` 裡有 `python -m app.run`，就可以關掉它：
+
+```powershell
+Stop-Process -Id <PID>
+```
+
+只有在確認沒有任何 `python -m app.run` 還活著，但鎖檔仍然卡住時，才刪除鎖檔：
+
+```powershell
+Remove-Item logs\app.lock
+```
+
 ### 遊玩（在你的 Discord 頻道中）
 
 1. `/start`：開始冒險並顯示兩名英雄。
 2. 兩位玩家分別點擊 **Play Bram** / **Play Lyra**，或使用 `/join bram` / `/join lyra`。
-3. 兩人都加入後，第一個場景會開啟。**直接輸入你要做什麼**，例如：*我請 Old Perrin 喝一杯，問他商隊往哪裡去了。*
+3. 兩人都加入後，第一個場景會開啟。使用 `/action` 宣告你要做什麼，例如：`/action 我請 Old Perrin 喝一杯，問他商隊往哪裡去了。`
 4. 需要檢定時，點擊**骰子**按鈕擲骰。
 5. 常用 slash commands：`/character`, `/scene`, `/roll 1d20+3`, `/next`, `/fight`, `/help`。
 

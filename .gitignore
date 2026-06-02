@@ -16,7 +16,12 @@ env/
 save/
 
 # Runtime logs
+logs/trace.log
+logs/trace.log.*
 logs/trace_*.log
+
+# Single-instance lockfile
+logs/app.lock
 
 # Editor / OS
 .vscode/

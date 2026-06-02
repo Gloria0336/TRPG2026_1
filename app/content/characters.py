@@ -27,6 +27,7 @@ def _bram() -> Character:
         save_prof=["STR", "CON"],
         portrait="盾",
         blurb="穩健的劍盾戰士。拿不定主意時，先揮劍就對了。",
+        inventory=["長劍", "重弩與弩矢", "鏈甲與盾牌", "火把數支", "繩索 15 公尺", "乾糧與水袋", "少許銀幣"],
         actions=[
             Action(
                 name="Longsword",
@@ -73,6 +74,7 @@ def _lyra() -> Character:
         save_prof=["WIS", "CHA"],
         portrait="光",
         blurb="心地溫暖的牧師，能扶起同伴，也能懲戒邪惡。",
+        inventory=["釘頭錘", "鎖子甲", "聖徽", "治療藥草", "火把數支", "祈禱書", "少許銀幣"],
         actions=[
             Action(
                 name="Mace",

@@ -16,12 +16,12 @@ import time
 import httpx
 
 from ..config import settings
-from ..engine.resolution import APPROACH_SYNONYMS, normalize_approach
-from ..engine.types import Character, Intent, IntentTier, ResolutionResult, SKILLS
+from ..engine.resolution import APPROACH_SYNONYMS, normalize_approach, requires_check
+from ..engine.types import Character, Intent, IntentTier, ResolutionResult, ResultKind, SKILLS
 from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
 from . import guard, prompts
-from .schemas import IntentParse
+from .schemas import EntityExtraction, IntentParse
 
 log = get_logger("ai")
 
@@ -188,6 +188,7 @@ async def interpret(state: GameState, actor_id: str, text: str) -> tuple[Intent,
                      parsed.tier, parsed.action, parsed.target, parsed.approach,
                      parsed.is_attack, parsed.snapped_dc())
             intent = _to_intent(actor_id, text, parsed)
+            _apply_check_gate(state, intent)
             log.debug("interpret: built Intent=%r", intent)
             return intent, parsed.snapped_dc()
         except httpx.HTTPStatusError as exc:
@@ -204,9 +205,22 @@ async def interpret(state: GameState, actor_id: str, text: str) -> tuple[Intent,
         log.info("interpret: AI disabled, using offline parser")
 
     fallback = _offline_parse(state, actor, text)
+    _apply_check_gate(state, fallback)
     log.info("interpret: offline parse → tier=%s action=%s target=%s approach=%s is_attack=%s",
              fallback.tier.value, fallback.action, fallback.target, fallback.approach, fallback.is_attack)
     return fallback, None
+
+
+def _apply_check_gate(state: GameState, intent: Intent) -> None:
+    """Engine has the final say on whether a Tier-A action rolls (design §8.3). The AI
+    may propose `needs_check=false`, but `requires_check` can force it back to true so a
+    contested/risky/targeted action can never be narrated into a free success. Final
+    value = AI proposal OR engine requirement."""
+    final = bool(intent.needs_check or requires_check(state, intent))
+    if final != intent.needs_check:
+        log.info("interpret: check-gate override needs_check %s→%s (action=%s target=%s approach=%s)",
+                 intent.needs_check, final, intent.action, intent.target, intent.approach)
+    intent.needs_check = final
 
 
 def _extract_json(raw: str) -> str:
@@ -230,9 +244,11 @@ def _to_intent(actor_id: str, text: str, p: IntentParse) -> Intent:
         target=p.target,
         approach=normalize_approach(p.approach) if p.approach else None,
         is_attack=p.is_attack,
+        needs_check=p.needs_check,
         candidates=p.candidates,
         question=p.question,
         options=p.options,
+        implausible=p.implausible,
     )
 
 
@@ -286,12 +302,16 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
     """Turn a computed ResolutionResult into prose. Never alters the result."""
     log.info("narrate() kind=%s actor=%s summary=%s",
              getattr(result, "kind", "?"), result.actor_name, truncate(result.summary, 200))
+    # A no-roll narrative beat has no numbers to dramatize or protect — narrate it with
+    # a lighter "nothing is at stake" system prompt and skip the number guard.
+    is_beat = getattr(result, "kind", None) is ResultKind.NARRATIVE
+    narrate_system = prompts.NARRATE_BEAT_SYSTEM if is_beat else prompts.NARRATE_SYSTEM
     if _ai_enabled():
         try:
             base_user = prompts.narrate_context(state, result)
             prose = await _chat(
                 settings.model_narrate,
-                prompts.NARRATE_SYSTEM,
+                narrate_system,
                 base_user,
                 max_tokens=200,
             )
@@ -300,7 +320,8 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
 
             # §8.0 guard: enforce "AI never touches numbers" at the engine boundary.
             # On violation, give the model one strict-reminder retry before bailing.
-            violations = guard.find_violations(prose, result)
+            # A beat carries no numbers, so there is nothing to guard.
+            violations = [] if is_beat else guard.find_violations(prose, result)
             if violations:
                 log.warning("narrate: guard caught violations on first reply: %s",
                             "; ".join(violations))
@@ -308,7 +329,7 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
                 try:
                     retry = await _chat(
                         settings.model_narrate,
-                        prompts.NARRATE_SYSTEM,
+                        narrate_system,
                         retry_user,
                         max_tokens=200,
                     )
@@ -368,6 +389,36 @@ def _fallback_hint_text(hint: str) -> str:
         "A fragile, fading moment between life and death.": "生死之間只剩下一線微弱的呼吸。",
     }
     return hints.get(hint, hint)
+
+
+async def extract_entity_states(state: GameState, prose: str, result: ResolutionResult | None = None) -> EntityExtraction:
+    """Read a narration and pull validated entity-state deltas (who left, who turned
+    hostile, who newly appeared). Cheap model, JSON mode. Offline / disabled / on any
+    error → empty extraction, so only structured/engine deltas apply (design fallback)."""
+    if not prose or not prose.strip():
+        return EntityExtraction()
+    if not (_ai_enabled() and settings.entity_extraction_enabled):
+        log.info("extract: skipped (ai_enabled=%s flag=%s)",
+                 _ai_enabled(), settings.entity_extraction_enabled)
+        return EntityExtraction()
+    try:
+        raw = await _chat(
+            settings.model_extract,
+            prompts.EXTRACT_SYSTEM,
+            prompts.extract_context(state, prose),
+            json_mode=True,
+            max_tokens=300,
+        )
+        extracted = _extract_json(raw)
+        parsed = EntityExtraction.model_validate_json(extracted)
+        log.info("extract: %d actionable delta(s) of %d", len(parsed.actionable()), len(parsed.deltas))
+        log.debug("extract: deltas=%s", truncate(str(parsed.deltas), 500))
+        return parsed
+    except httpx.HTTPError as exc:
+        log.warning("extract: transport/HTTP failure (%s: %s) — no deltas", type(exc).__name__, exc)
+    except Exception as exc:  # noqa: BLE001 — schema/JSON error must not break play
+        log.warning("extract: failed (%s: %s) — no deltas", type(exc).__name__, exc)
+    return EntityExtraction()
 
 
 async def open_scene(state: GameState) -> str:

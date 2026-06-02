@@ -25,6 +25,57 @@ def test_resolve_logs_event():
     assert gs.event_log[-1].data["kind"] == "check"
 
 
+def test_narrative_beat_logs_no_roll_result():
+    gs = _fresh()
+    before = len(gs.event_log)
+    pc = gs.characters["pc_lyra"]
+    res = resolution.narrative_beat(gs, pc, "walk to the window",
+                                    target_name="窗邊", raw_text="我走到窗邊看看外面")
+    assert res.kind is ResultKind.NARRATIVE
+    assert res.success is None and res.band is None
+    assert res.roll_breakdown is None and res.dc is None
+    assert res.target_name == "窗邊"
+    # logged before target/raw_text would be lost, so the event carries them
+    assert len(gs.event_log) == before + 1
+    assert gs.event_log[-1].data["kind"] == "narrative"
+
+
+def test_requires_check_trivial_action_is_free():
+    gs = _fresh()  # tavern
+    # No target, no contested skill, not a scene challenge → genuinely no roll.
+    intent = Intent(actor_id="pc_lyra", raw_text="I walk over to the window",
+                    tier=IntentTier.A, action="walk to the window")
+    assert resolution.requires_check(gs, intent) is False
+
+
+def test_requires_check_forces_roll_for_contested_skill():
+    gs = _fresh()
+    intent = Intent(actor_id="pc_lyra", raw_text="I sneak past", tier=IntentTier.A,
+                    action="sneak", approach="stealth", needs_check=False)
+    assert resolution.requires_check(gs, intent) is True
+
+
+def test_requires_check_forces_roll_for_attack():
+    gs = _fresh()
+    intent = Intent(actor_id="pc_lyra", raw_text="I attack", tier=IntentTier.A,
+                    is_attack=True, needs_check=False)
+    assert resolution.requires_check(gs, intent) is True
+
+
+def test_requires_check_forces_roll_against_scene_challenge():
+    gs = _fresh()  # tavern: perception is a DC-15 challenge
+    intent = Intent(actor_id="pc_lyra", raw_text="I look around the room",
+                    tier=IntentTier.A, action="look", approach="perception", needs_check=False)
+    assert resolution.requires_check(gs, intent) is True
+
+
+def test_requires_check_forces_roll_against_wary_target():
+    gs = _fresh()  # tavern: the hooded figure is 'afraid' (an opposed disposition)
+    intent = Intent(actor_id="pc_lyra", raw_text="I hand the hooded figure a drink",
+                    tier=IntentTier.A, action="offer drink", target="兜帽客", needs_check=False)
+    assert resolution.requires_check(gs, intent) is True
+
+
 def test_determine_dc_uses_scene_table():
     gs = _fresh()  # tavern: persuasion DC 13
     intent = Intent(actor_id="pc_lyra", raw_text="persuade", tier=IntentTier.A, approach="persuasion")
@@ -76,6 +127,23 @@ def test_active_campaign_tracks_started_not_over_state():
 
     gs.flags["over"] = True
     assert not game_state.has_active_campaign()
+    game_state.set_state(None)
+
+
+def test_active_campaign_channel_helpers_ignore_unbound_channels():
+    game_state.set_state(None)
+
+    gs = game_state.reset_state(channel_id=0)
+    assert game_state.has_active_campaign()
+    assert game_state.active_campaign() is gs
+    assert not game_state.has_discord_channel_binding(gs)
+    assert game_state.active_campaign_for_channel(123) is None
+
+    gs.channel_id = 123
+    assert game_state.has_discord_channel_binding(gs)
+    assert game_state.active_campaign_for_channel(123) is gs
+    assert game_state.active_campaign_for_channel(456) is None
+
     game_state.set_state(None)
 
 

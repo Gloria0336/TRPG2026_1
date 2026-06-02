@@ -32,8 +32,23 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     model_intent: str = "openai/gpt-4o-mini"
     model_narrate: str = "anthropic/claude-sonnet-4.5"
+    # Cheap model for the post-narration entity-state extraction pass (§8.2).
+    # Defaults to the intent model unless overridden in .env.
+    model_extract: str = "openai/gpt-4o-mini"
     openrouter_app_url: str = "http://localhost:8000"
     openrouter_app_name: str = "AI Living World MVP"
+
+    # Memory / continuity
+    # When True (and AI is online), each narration is read by model_extract to pull
+    # structured entity-state deltas (who left, who turned hostile…). Offline this is
+    # skipped and only structured/engine deltas apply.
+    entity_extraction_enabled: bool = True
+
+    # Debounce for auto-registering NEW entities the AI mentions in prose: a brand-new
+    # place/person must be named this many times before it becomes a real record. Stops
+    # one-off background flavour from bloating the world, while letting genuinely recurring
+    # elements persist. A player's explicit travel target bypasses this (threshold 1).
+    mention_promote_threshold: int = 3
 
     # Web dashboard
     web_host: str = "127.0.0.1"
@@ -43,6 +58,10 @@ class Settings(BaseSettings):
     dice_seed: int | None = None
     narrate_context_window: int = 12
     ai_offline: bool = False
+
+    # SQLite memory store (design §5.3, SQLite variant). Mutable so tests can point
+    # it at a temp file; the DB layer reopens when this changes.
+    db_path: Path = SAVE_DIR / "world.db"
 
     @field_validator("dice_seed", mode="before")
     @classmethod

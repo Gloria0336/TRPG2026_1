@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -11,9 +12,18 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..ai import orchestrator
 from ..config import STATIC_DIR
+from ..db import store
 from ..state import game_state
 
-app = FastAPI(title="AI Living World 儀表板")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Ensure the SQLite memory store exists when the dashboard runs standalone.
+    store.init_db()
+    yield
+
+
+app = FastAPI(title="AI Living World 儀表板", lifespan=_lifespan)
 
 
 async def _snapshot() -> dict:
