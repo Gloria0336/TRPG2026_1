@@ -18,6 +18,10 @@ def test_index_served(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "AI Living World" in r.text
+    assert 'href="./static/style.css"' in r.text
+    assert 'src="./static/app.js"' in r.text
+    assert 'href="/static/style.css"' not in r.text
+    assert 'src="/static/app.js"' not in r.text
 
 
 def test_state_empty(client):
