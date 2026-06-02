@@ -193,3 +193,32 @@ python -m pytest -q
 ## 可調整項目
 
 請見 `.env` 與 `app/config.py`：`DICE_SEED`（確定性骰子）、`NARRATE_CONTEXT_WINDOW`、`AI_OFFLINE`、模型 ID，以及網頁 host／port。DC 錨點位於 `app/engine/rules_5e.py`；劇本與 stat blocks 位於 `app/content/`。
+
+## GitHub Pages 發佈 dashboard
+
+這個專案已加入 GitHub Actions workflow：推送到 `main` 後，會把 `app/web/static/` 建置到 `dist/`，再發佈到 `gh-pages` 分支。
+
+1. 到 GitHub repo 的 **Settings > Pages**。
+2. Source 選 **Deploy from a branch**。
+3. Branch 選 `gh-pages`，資料夾選 `/ (root)`。
+4. 推送 `main`，或到 **Actions > Deploy dashboard to gh-pages** 手動執行。
+
+GitHub Pages 只能託管靜態前端；即時狀態 API 仍需要另外啟動 FastAPI：
+
+```powershell
+python -m app.run
+```
+
+如果 dashboard 網站部署在 `https://your-user.github.io/TRPG2026_1/`，而 API 暴露在 `https://your-api.example.com`，請在後端 `.env` 設定：
+
+```text
+WEB_CORS_ORIGINS=https://your-user.github.io
+```
+
+然後用這個網址開啟外部 dashboard：
+
+```text
+https://your-user.github.io/TRPG2026_1/?api=https://your-api.example.com
+```
+
+`?api=` 會被記在瀏覽器 localStorage，之後同一台瀏覽器可以直接開 Pages 網址。

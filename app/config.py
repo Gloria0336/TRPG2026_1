@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # Web dashboard
     web_host: str = "127.0.0.1"
     web_port: int = 8000
+    web_cors_origins: str = ""
 
     # Engine
     dice_seed: int | None = None
@@ -73,6 +74,14 @@ class Settings(BaseSettings):
     @property
     def session_path(self) -> Path:
         return SAVE_DIR / "session.json"
+
+    @property
+    def parsed_web_cors_origins(self) -> list[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.web_cors_origins.split(",")
+            if origin.strip()
+        ]
 
 
 settings = Settings()

@@ -15,7 +15,7 @@
   <main>
     <section class="status-grid">
       <div class="panel monitor">
-        <h2>AI model 連線</h2>
+        <h2>AI model 狀態</h2>
         <div class="monitor-row">
           <span id="ai-status-dot" class="dot offline"></span>
           <span id="ai-status-text">檢查中...</span>
@@ -24,14 +24,14 @@
       </div>
 
       <div class="panel monitor">
-        <h2>角色選擇</h2>
+        <h2>玩家認領</h2>
         <div id="player-claims" class="claim-list"></div>
       </div>
     </section>
 
     <section id="scene" class="panel scene">
-      <h2 id="scene-title">尚未開始遊戲</h2>
-      <p id="scene-summary" class="muted">在 Discord 使用 <code>/start</code> 開始一場冒險。</p>
+      <h2 id="scene-title">尚未開始</h2>
+      <p id="scene-summary" class="muted">在 Discord 使用 <code>/start</code> 開始一場遊戲。</p>
       <div id="scene-npcs" class="npcs"></div>
     </section>
 
@@ -40,8 +40,13 @@
       <ol id="initiative" class="initiative"></ol>
     </section>
 
+    <section class="panel quest-board">
+      <h2>任務發播</h2>
+      <div id="quests" class="quest-list"></div>
+    </section>
+
     <section class="panel">
-      <h2>隊伍與 NPC</h2>
+      <h2>角色/NPC</h2>
       <div id="characters" class="cards"></div>
     </section>
 

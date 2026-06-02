@@ -7,7 +7,13 @@ from ..config import settings
 from ..db import store
 from ..engine import conditions as cond
 from ..logging_setup import truncate
-from .schemas import ALLOWED_SKILLS, EXTRACT_JSON_SHAPE, INTENT_JSON_SHAPE
+from .schemas import (
+    ALLOWED_SKILLS,
+    EXTRACT_JSON_SHAPE,
+    INTENT_JSON_SHAPE,
+    QUEST_DETAILS_JSON_SHAPE,
+    QUEST_SEED_JSON_SHAPE,
+)
 
 if TYPE_CHECKING:
     from ..engine.types import Character, ResolutionResult
@@ -330,6 +336,26 @@ def _entities_block(state: "GameState") -> str:
     return "\n".join(lines)
 
 
+def _quests_block(state: "GameState") -> str:
+    try:
+        quests = store.list_quests(scene_id=state.current_location_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not quests:
+        return ""
+    lines = []
+    for q in quests[:8]:
+        seed = q.get("seed") or {}
+        details = q.get("details") or {}
+        title = details.get("title") or seed.get("title_hint") or q.get("dedupe_key")
+        objective = details.get("objective") or seed.get("objective_hint") or seed.get("premise") or ""
+        lines.append(
+            f"- {title} [{q.get('status')}/{q.get('detail_state')}], "
+            f"giver={q.get('giver') or seed.get('giver')}, objective={truncate(objective, 120)}"
+        )
+    return "STABLE QUEST TRUTH (do not contradict):\n" + "\n".join(lines)
+
+
 def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     window = settings.narrate_context_window
     recent = state.event_log[-window:-1] if len(state.event_log) > 1 else []
@@ -340,6 +366,9 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     ]
     if entities:
         parts.append(entities)
+    quests = _quests_block(state)
+    if quests:
+        parts.append(quests)
     parts += [
         f"RECENT EVENTS:\n{history}",
         "STRUCTURED RESULT (do not alter any of this):",
@@ -393,6 +422,57 @@ any new mechanical outcome.
 
 
 # ───────────────────────── Location opener ─────────────────────────
+NARRATE_QUEST_SYSTEM = f"""You are the GAME MASTER narrator for a Dungeons & Dragons \
+5e session, and you may also signal when an NPC is offering a quest.
+
+Return ONLY JSON. `prose` is the Traditional Chinese GM narration. `quest_offer` is null \
+unless an NPC is clearly issuing a task, commission, request for help, bounty, rescue, \
+escort, investigation, or other playable mission in this very response.
+
+Important:
+- The quest_offer is only a compact seed for a background quest agent, not the full quest.
+- Do not create quest_offer for ordinary colour, combat, environmental description, or a \
+player merely thinking about a goal.
+- If the player failed to obtain cooperation, keep quest_offer null.
+- Use `direct_accept` when the NPC is openly offering the job.
+- Use `requires_check` when the NPC is withholding the job until trust, credentials, \
+negotiation, or proof is established.
+- Tags must use the fixed eight-axis taxonomy names and values already implied by the JSON shape.
+
+Respond with this exact shape:
+{QUEST_SEED_JSON_SHAPE}"""
+
+
+QUEST_AGENT_SYSTEM = f"""You are the QUEST AGENT for a living-world tabletop RPG.
+You receive a compact quest seed plus brief context. Expand it into a stable executable \
+quest card that future NPC narration must not contradict.
+
+Rules:
+- Write all player-facing text in Traditional Chinese.
+- Do not invent unrelated plotlines; only stabilize and clarify what follows from the seed.
+- Prefer concise concrete lists.
+- The result should be useful once the player accepts the task: objective, known facts, \
+details, next steps, success conditions, risks, reward, and fixed taxonomy tags.
+- Tags must use the fixed eight-axis taxonomy only.
+
+Respond with ONLY JSON:
+{QUEST_DETAILS_JSON_SHAPE}"""
+
+
+def quest_agent_context(state: "GameState", seed: dict) -> str:
+    recent = state.event_log[-6:] if state.event_log else []
+    history = "\n".join(_event_line(e) for e in recent) or "- (no recent events)"
+    present = "\n".join(_entity_label(e) for e in state.present_entities()) or "- none"
+    return (
+        f"QUEST SEED JSON:\n{seed}\n\n"
+        f"LOCATION: {current_location_label(state)}\n"
+        f"SCENE SUMMARY:\n{compose_scene_summary(state)}\n\n"
+        f"RELEVANT ENTITIES:\n{present}\n\n"
+        f"RECENT EVENTS:\n{history}\n\n"
+        "Expand this quest seed into the stable quest card now."
+    )
+
+
 SCENE_SYSTEM = """You are the GAME MASTER establishing a LOCATION in a D&D 5e one-shot. \
 Paint the place in 2-4 atmospheric sentences based on the provided summary. Do not resolve \
 any actions or invent mechanics; just describe where the party finds themselves and invite \

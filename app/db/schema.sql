@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS event_log (
 );
 CREATE INDEX IF NOT EXISTS idx_event_scene_ts ON event_log(scene_id, ts);
 
+-- Quest board. AI GM emits a small quest seed; the quest agent later expands it
+-- into stable details so NPCs do not drift between conversations.
+CREATE TABLE IF NOT EXISTS quests (
+    id              TEXT PRIMARY KEY,
+    dedupe_key      TEXT NOT NULL UNIQUE,
+    source_event_id TEXT,
+    scene_id        TEXT,
+    giver           TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'available',
+    visibility      TEXT NOT NULL DEFAULT 'summary',
+    seed            TEXT NOT NULL DEFAULT '{}',
+    details         TEXT NOT NULL DEFAULT '{}',
+    tags            TEXT NOT NULL DEFAULT '{}',
+    detail_state    TEXT NOT NULL DEFAULT 'pending_agent',
+    created_ts      REAL NOT NULL,
+    updated_ts      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quests_scene_status ON quests(scene_id, status);
+
 -- ── Mention tally: debounce for auto-registering NEW entities the AI names in prose.
 --    A brand-new place/person is counted here per location scope; only after it is
 --    mentioned `mention_promote_threshold` times is it promoted into `entities`. This

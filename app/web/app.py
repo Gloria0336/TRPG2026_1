@@ -6,12 +6,13 @@ import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from ..ai import orchestrator
-from ..config import STATIC_DIR
+from ..config import STATIC_DIR, settings
 from ..db import store
 from ..state import game_state
 
@@ -24,6 +25,14 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Living World 儀表板", lifespan=_lifespan)
+
+if settings.parsed_web_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.parsed_web_cors_origins,
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
 
 
 async def _snapshot() -> dict:

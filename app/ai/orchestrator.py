@@ -21,7 +21,7 @@ from ..engine.types import Character, Intent, IntentTier, ResolutionResult, Resu
 from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
 from . import guard, prompts
-from .schemas import EntityExtraction, IntentParse
+from .schemas import EntityExtraction, IntentParse, NarrationQuestEnvelope, QuestDetails, QuestSeed
 
 log = get_logger("ai")
 
@@ -375,6 +375,81 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
     log.info("narrate: canned narration (%d chars)", len(canned))
     log.debug("narrate: canned=%s", truncate(canned, 500))
     return canned
+
+
+def _quest_eligible(result: ResolutionResult) -> bool:
+    if getattr(result, "kind", None) not in (ResultKind.CHECK, ResultKind.NARRATIVE):
+        return False
+    if result.success is False:
+        return False
+    if not result.target_name:
+        return False
+    text = " ".join(str(x or "") for x in (result.raw_text, result.topic, result.summary)).lower()
+    socialish = (
+        "persuasion" in text or "insight" in text or "deception" in text
+        or "intimidation" in text or "詢問" in text or "委託" in text
+        or "任務" in text or "幫" in text or "協助" in text
+    )
+    return socialish
+
+
+async def narrate_with_quest(state: GameState, result: ResolutionResult) -> tuple[str, QuestSeed | None]:
+    """Narrate a result and let the GM emit a compact quest seed in the same reply."""
+    if not _quest_eligible(result):
+        return await narrate(state, result), None
+    if not _ai_enabled():
+        return await narrate(state, result), None
+
+    base_user = prompts.narrate_context(state, result)
+    try:
+        raw = await _chat(
+            settings.model_narrate,
+            prompts.NARRATE_QUEST_SYSTEM,
+            base_user,
+            json_mode=True,
+            max_tokens=650,
+        )
+        parsed = NarrationQuestEnvelope.model_validate_json(_extract_json(raw))
+        prose = (parsed.prose or "").strip()
+        if not prose:
+            raise ValueError("quest narration payload had empty prose")
+        violations = [] if result.kind is ResultKind.NARRATIVE else guard.find_violations(prose, result)
+        if violations:
+            log.warning("narrate_with_quest: guard rejected prose: %s", "; ".join(violations))
+            return await narrate(state, result), None
+        seed = parsed.quest_offer if parsed.quest_offer and parsed.quest_offer.should_create() else None
+        return prose, seed
+    except Exception as exc:  # noqa: BLE001
+        log.warning("narrate_with_quest: failed (%s: %s) — falling back to prose-only",
+                    type(exc).__name__, exc)
+        return await narrate(state, result), None
+
+
+async def build_quest_details(state: GameState, seed: QuestSeed | dict) -> tuple[dict, str]:
+    """Run the quest agent. Returns (details, detail_state)."""
+    seed_obj = seed if isinstance(seed, QuestSeed) else QuestSeed.model_validate(seed)
+    seed_data = seed_obj.model_dump()
+    if _ai_enabled():
+        try:
+            raw = await _chat(
+                settings.model_extract,
+                prompts.QUEST_AGENT_SYSTEM,
+                prompts.quest_agent_context(state, seed_data),
+                json_mode=True,
+                max_tokens=800,
+            )
+            details = QuestDetails.model_validate_json(_extract_json(raw))
+            data = details.model_dump()
+            if not data.get("title"):
+                data["title"] = seed_obj.title_hint
+            if not data.get("giver"):
+                data["giver"] = seed_obj.giver
+            return data, "ready"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quest_agent: failed (%s: %s) — using degraded seed details",
+                        type(exc).__name__, exc)
+    from ..db import store
+    return store.fallback_quest_details(seed_data), "details_degraded"
 
 
 def _canned_narration(result: ResolutionResult) -> str:

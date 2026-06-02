@@ -4,6 +4,23 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+const API_BASE = (() => {
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = params.get("api");
+  if (fromQuery) {
+    const normalized = fromQuery.replace(/\/+$/, "");
+    window.localStorage.setItem("aiLivingWorldApiBase", normalized);
+    return normalized;
+  }
+  const fromConfig = window.AI_LIVING_WORLD_API_BASE || "";
+  const fromStorage = window.localStorage.getItem("aiLivingWorldApiBase") || "";
+  return String(fromConfig || fromStorage).replace(/\/+$/, "");
+})();
+
+function apiUrl(path) {
+  return API_BASE ? `${API_BASE}${path}` : path;
+}
+
 const NAME_ZH = {
   "Bram Ironwood": "布拉姆·鐵木",
   "Lyra Dawnbringer": "萊拉·曦光使者",
@@ -167,9 +184,126 @@ function renderClaims(state) {
   }).join("");
 }
 
+const QUEST_STATUS_ZH = {
+  available: "待接",
+  awaiting_check: "待檢定",
+  accepted: "已接取",
+  completed: "完成",
+  failed: "失敗",
+  expired: "過期",
+};
+
+const QUEST_DETAIL_STATE_ZH = {
+  pending_agent: "整理中",
+  ready: "已整理",
+  details_degraded: "簡版",
+};
+
+const QUEST_TAG_ZH = {
+  npc_commission: "NPC委託",
+  rumor: "傳聞",
+  guild_notice: "公會公告",
+  faction_order: "陣營命令",
+  personal_goal: "個人目標",
+  world_event: "世界事件",
+  immediate: "立即",
+  timed: "限時",
+  open_ended: "開放",
+  downtime: " downtime",
+  recurring: "週期",
+  personal: "個人",
+  local: "地方",
+  regional: "區域",
+  factional: "陣營",
+  kingdom: "王國",
+  world: "世界",
+  social: "社交",
+  exploration: "探索",
+  combat: "戰鬥",
+  stealth: "潛行",
+  knowledge: "知識",
+  crafting: "製作",
+  survival: "生存",
+  magic: "魔法",
+  mixed: "混合",
+  lawful: "守序",
+  good: "善良",
+  neutral: "中立",
+  chaotic: "混亂",
+  evil: "邪惡",
+  ambiguous: "曖昧",
+  trivial: "瑣事",
+  low: "低風險",
+  moderate: "中風險",
+  high: "高風險",
+  deadly: "致命",
+  unknown: "未知",
+  solo: "單人",
+  party: "隊伍",
+  local_group: "地方小隊",
+  settlement: "聚落",
+  faction: "組織",
+  army: "軍隊",
+  delivery: "遞送",
+  escort: "護送",
+  investigation: "調查",
+  rescue: "救援",
+  bounty: "懸賞",
+  negotiation: "交涉",
+  dungeon: "地城",
+  defense: "防衛",
+  sabotage: "破壞",
+  recovery: "取回",
+  trade: "交易",
+  mystery: "謎團",
+};
+
+function renderQuests(state) {
+  const el = $("quests");
+  if (!el) return;
+  const quests = state?.quests || [];
+  if (!quests.length) {
+    el.innerHTML = `<div class="empty">目前沒有發播任務</div>`;
+    return;
+  }
+  el.innerHTML = quests.map(renderQuest).join("");
+}
+
+function renderQuest(q) {
+  const tags = Object.values(q.tags || {})
+    .map((v) => `<span>${esc(QUEST_TAG_ZH[v] || v)}</span>`).join("");
+  const gate = q.acceptance_mode === "requires_check"
+    ? `接取門檻：${esc(q.required_check || "檢定")}` : "可直接接受";
+  const details = q.details ? renderQuestDetails(q.details) : "";
+  return `<article class="quest ${esc(q.status || "")}">
+    <div class="quest-head">
+      <strong>${esc(q.title || "未命名任務")}</strong>
+      <span>${esc(QUEST_STATUS_ZH[q.status] || q.status || "")}</span>
+    </div>
+    <div class="quest-meta">${esc(q.giver || "未知委託人")} · ${esc(gate)} · ${esc(QUEST_DETAIL_STATE_ZH[q.detail_state] || q.detail_state || "")}</div>
+    <p>${esc(q.summary || q.objective || "")}</p>
+    ${q.reward ? `<div class="quest-reward">報酬：${esc(q.reward)}</div>` : ""}
+    <div class="quest-tags">${tags}</div>
+    ${details}
+  </article>`;
+}
+
+function renderQuestDetails(d) {
+  const block = (title, xs) => (xs || []).length
+    ? `<div class="quest-detail"><b>${title}</b><ul>${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
+  return `<div class="quest-details">
+    ${block("已知情報", d.known_info)}
+    ${block("細節", d.details)}
+    ${block("下一步", d.next_steps)}
+    ${block("成功條件", d.success_conditions)}
+    ${block("風險", d.failure_risks)}
+  </div>`;
+}
+
 function render(state) {
   renderAiStatus(state?.ai);
   renderClaims(state);
+  renderQuests(state);
   if (!state || !state.started) {
     $("scene-title").textContent = "尚未開始遊戲";
     $("scene-summary").innerHTML = "在 Discord 使用 <code>/start</code> 開始一場冒險。";
@@ -177,6 +311,7 @@ function render(state) {
     $("characters").innerHTML = "";
     $("combat").classList.add("hidden");
     $("log").innerHTML = "";
+    renderQuests(state);
     return;
   }
 
@@ -246,9 +381,22 @@ function renderLog(e) {
 }
 
 function connect() {
-  fetch("/api/state").then((r) => r.json()).then(render).catch(() => {});
-  const es = new EventSource("/api/stream");
-  es.addEventListener("state", (ev) => { setStatus(true); render(JSON.parse(ev.data)); });
+  fetch(apiUrl("/api/state"))
+    .then((r) => {
+      if (!r.ok) throw new Error(`state request failed: ${r.status}`);
+      return r.json();
+    })
+    .then(render)
+    .catch(() => {
+      setStatus(false);
+      render(null);
+    });
+
+  const es = new EventSource(apiUrl("/api/stream"));
+  es.addEventListener("state", (ev) => {
+    setStatus(true);
+    render(JSON.parse(ev.data));
+  });
   es.onopen = () => setStatus(true);
   es.onerror = () => { setStatus(false); };
 }

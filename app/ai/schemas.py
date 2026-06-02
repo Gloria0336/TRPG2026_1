@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ..content import quest_taxonomy
 from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES
 from ..engine import conditions as cond
 from ..engine.rules_5e import DC_ANCHORS
@@ -137,6 +138,73 @@ class EntityExtraction(BaseModel):
         return [d for d in self.deltas if not d.is_noop()]
 
 
+class QuestSeed(BaseModel):
+    """Small GM-authored quest seed for the background quest agent."""
+
+    seed_id: str | None = None
+    giver: str = ""
+    title_hint: str = ""
+    premise: str = ""
+    objective_hint: str = ""
+    reward_hint: str = ""
+    acceptance_mode: Literal["direct_accept", "requires_check"] = "direct_accept"
+    required_check: str | None = None
+    known_constraints: str = ""
+    named_entities: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    stakes: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
+    dedupe_key: str = ""
+
+    @field_validator("named_entities", "locations", mode="before")
+    @classmethod
+    def _seed_none_to_empty(cls, value: object) -> object:
+        return [] if value is None else value
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_seed_tags(cls, value: object) -> dict[str, str]:
+        return quest_taxonomy.normalize_tags(value if isinstance(value, dict) else {})
+
+    def should_create(self) -> bool:
+        return bool((self.giver or "").strip() and (self.premise or self.objective_hint or self.title_hint))
+
+
+class NarrationQuestEnvelope(BaseModel):
+    """GM narration payload: prose plus an optional quest seed."""
+
+    prose: str = ""
+    quest_offer: QuestSeed | None = None
+
+
+class QuestDetails(BaseModel):
+    """Executable quest card produced by the quest agent."""
+
+    title: str = ""
+    giver: str = ""
+    objective: str = ""
+    known_info: list[str] = Field(default_factory=list)
+    details: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+    success_conditions: list[str] = Field(default_factory=list)
+    failure_risks: list[str] = Field(default_factory=list)
+    reward: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator(
+        "known_info", "details", "next_steps", "success_conditions", "failure_risks",
+        mode="before",
+    )
+    @classmethod
+    def _details_none_to_empty(cls, value: object) -> object:
+        return [] if value is None else value
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_detail_tags(cls, value: object) -> dict[str, str]:
+        return quest_taxonomy.normalize_tags(value if isinstance(value, dict) else {})
+
+
 _KNOWN_CONDITION_IDS = sorted(cond.CATALOG.keys())
 
 
@@ -174,5 +242,44 @@ INTENT_JSON_SHAPE = (
     '  "options": [2-4 option labels]                 // tier C only,\n'
     '  "suggested_dc": 5|10|15|20|25|30|35 | null,    // only for unusual off-table actions\n'
     '  "implausible": true if the message relies on gear the actor lacks or a fact not in the scene, else false\n'
+    '}'
+)
+
+
+QUEST_SEED_JSON_SHAPE = (
+    '{\n'
+    '  "prose": "Traditional Chinese GM narration",\n'
+    '  "quest_offer": {\n'
+    '    "seed_id": short stable id or null,\n'
+    '    "giver": NPC name issuing the task,\n'
+    '    "title_hint": short quest title hint,\n'
+    '    "premise": one-sentence situation,\n'
+    '    "objective_hint": what the party is being asked to do,\n'
+    '    "reward_hint": promised reward or empty string,\n'
+    '    "acceptance_mode": "direct_accept" | "requires_check",\n'
+    '    "required_check": skill/check needed before acceptance or null,\n'
+    '    "known_constraints": limits, deadline, taboo, route, or empty string,\n'
+    '    "named_entities": [important people/objects],\n'
+    '    "locations": [important places],\n'
+    '    "stakes": what worsens if ignored,\n'
+    '    "tags": eight-axis fixed taxonomy object,\n'
+    '    "dedupe_key": stable lowercase key for this quest\n'
+    '  } | null\n'
+    '}'
+)
+
+
+QUEST_DETAILS_JSON_SHAPE = (
+    '{\n'
+    '  "title": quest title,\n'
+    '  "giver": quest giver,\n'
+    '  "objective": concrete objective,\n'
+    '  "known_info": [facts already revealed],\n'
+    '  "details": [stable details NPCs must not contradict],\n'
+    '  "next_steps": [immediate player-facing leads],\n'
+    '  "success_conditions": [what counts as completion],\n'
+    '  "failure_risks": [what happens if ignored/fails],\n'
+    '  "reward": reward text,\n'
+    '  "tags": eight-axis fixed taxonomy object\n'
     '}'
 )

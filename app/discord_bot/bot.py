@@ -35,6 +35,13 @@ _TRAVEL_VERBS: frozenset[str] = frozenset({
     "前往", "走", "去", "離開", "出發", "進入", "跟隨", "移動", "出門",
 })
 
+_QUEST_ACCEPT_WORDS: frozenset[str] = frozenset({
+    "accept", "accepted", "take the job", "take this job", "i will help", "i'll help",
+    "i will find", "i'll find", "count on me",
+    "接下", "接受", "我接", "我會幫", "我幫", "交給我", "我會找到", "我會救",
+    "我願意", "包在我", "承接", "答應",
+})
+
 
 def _looks_like_travel(gs, intent) -> bool:
     """True when the player's intent reads as 'move to a place'.
@@ -159,12 +166,51 @@ async def _send_dice_animation(channel, natural: int | None) -> None:
     await channel.send(file=file)
 
 
-async def _narrate_into_log(gs: game_state.GameState, result) -> str:
-    prose = await orchestrator.narrate(gs, result)
+async def _narrate_into_log(gs: game_state.GameState, result, *, allow_quest: bool = True) -> str:
+    if allow_quest:
+        prose, quest_seed = await orchestrator.narrate_with_quest(gs, result)
+    else:
+        prose, quest_seed = await orchestrator.narrate(gs, result), None
     if gs.event_log:
         gs.set_narration(gs.event_log[-1].id, prose)
     await _apply_entity_updates(gs, prose, result)
+    if quest_seed is not None:
+        await _handle_quest_seed(gs, result, quest_seed)
     return prose
+
+
+async def _handle_quest_seed(gs: game_state.GameState, result, quest_seed) -> None:
+    seed = quest_seed.model_dump() if hasattr(quest_seed, "model_dump") else dict(quest_seed)
+    dedupe = seed.get("dedupe_key") or (
+        f"{gs.current_location_id}:{seed.get('giver') or result.target_name}:"
+        f"{seed.get('title_hint') or seed.get('objective_hint') or seed.get('premise')}"
+    ).strip().lower()
+    status = "awaiting_check" if seed.get("acceptance_mode") == "requires_check" else "available"
+    event_id = gs.event_log[-1].id if gs.event_log else None
+    quest = store.upsert_quest_seed(
+        dedupe_key=dedupe,
+        seed={**seed, "dedupe_key": dedupe},
+        source_event_id=event_id,
+        scene_id=gs.current_location_id,
+        giver=seed.get("giver") or result.target_name or "",
+        status=status,
+        visibility="summary",
+        detail_state="pending_agent",
+    )
+    gs.bump()
+
+    async def run_agent(qid: str, seed_data: dict) -> None:
+        try:
+            details, detail_state = await orchestrator.build_quest_details(gs, seed_data)
+            store.set_quest_details(qid, details, detail_state=detail_state)
+            gs.bump()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quest agent background task failed (%s): %s", type(exc).__name__, exc)
+            degraded = store.fallback_quest_details(seed_data)
+            store.set_quest_details(qid, degraded, detail_state="details_degraded")
+            gs.bump()
+
+    asyncio.create_task(run_agent(quest["id"], quest["seed"]), name=f"quest-agent-{quest['id']}")
 
 
 async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) -> None:
@@ -227,6 +273,92 @@ def _target_from_display(enemies, label: str) -> str:
 def _character_name(gs: game_state.GameState, actor_id: str | None) -> str:
     actor = gs.characters.get(actor_id or "")
     return i18n.name(actor.name) if actor else "未知角色"
+
+
+def _text_accepts_quest(text: str) -> bool:
+    low = (text or "").lower()
+    return any(word in low or word in text for word in _QUEST_ACCEPT_WORDS)
+
+
+def _quest_matches_text(quest: dict, text: str) -> bool:
+    scoped = store.list_quests(scene_id=quest.get("scene_id"))
+    if len(scoped) == 1:
+        return True
+    seed = quest.get("seed") or {}
+    fields = (
+        quest.get("giver"), seed.get("giver"), seed.get("title_hint"),
+        seed.get("objective_hint"), seed.get("premise"),
+    )
+    return any(str(x or "") and str(x) in text for x in fields)
+
+
+def _sync_story_flags_for_accepted_quest(gs: game_state.GameState, quest: dict) -> None:
+    seed = quest.get("seed") or {}
+    details = quest.get("details") or {}
+    hay = " ".join(str(x or "") for x in (
+        quest.get("dedupe_key"), quest.get("giver"), seed.get("giver"),
+        seed.get("title_hint"), seed.get("premise"), seed.get("objective_hint"),
+        details.get("title"), details.get("objective"),
+    )).lower()
+    if gs.scene.id == "tavern" and (
+        "perrin" in hay or "老佩林" in hay or "佩林" in hay or "caravan" in hay or "商隊" in hay
+    ):
+        gs.flags["accepted_quest"] = True
+
+
+async def _try_accept_available_quest(channel, user, gs, pc, text: str) -> bool:
+    if not _text_accepts_quest(text):
+        return False
+    candidates = [
+        q for q in store.list_quests(scene_id=gs.current_location_id)
+        if q.get("status") == "available" and _quest_matches_text(q, text)
+    ]
+    if not candidates:
+        return False
+    quest = store.accept_quest(candidates[-1]["id"])
+    if quest is None:
+        return False
+    _sync_story_flags_for_accepted_quest(gs, quest)
+    gs.begin_freeplay_action(pc.id)
+    await _persist(gs)
+    async with channel.typing():
+        result = resolution.narrative_beat(
+            gs, pc, text, target_name=quest.get("giver") or None, raw_text=text,
+            hint="Describe the character accepting the quest plainly.",
+        )
+        prose = await _narrate_into_log(gs, result, allow_quest=False)
+    await channel.send(embed=embeds.result_embed(result, prose))
+    gs.complete_freeplay_action(pc.id)
+    await _track_story(channel, gs)
+    await _send_freeplay_turn_prompt(channel, gs)
+    return True
+
+
+def _maybe_apply_quest_check(gs: game_state.GameState, result) -> None:
+    if result.success is not True:
+        return
+    changed = False
+    for quest in store.list_quests(scene_id=gs.current_location_id):
+        if quest.get("status") != "awaiting_check":
+            continue
+        seed = quest.get("seed") or {}
+        check = str(seed.get("required_check") or "").lower()
+        summary = str(result.summary or "").lower()
+        target = str(result.target_name or "")
+        giver = str(quest.get("giver") or seed.get("giver") or "")
+        if check and check not in summary:
+            continue
+        if giver and target and giver not in target and target not in giver:
+            continue
+        if _text_accepts_quest(result.raw_text or ""):
+            accepted = store.accept_quest(quest["id"])
+            if accepted:
+                _sync_story_flags_for_accepted_quest(gs, accepted)
+        else:
+            store.update_quest_status(quest["id"], "available")
+        changed = True
+    if changed:
+        gs.bump()
 
 
 async def _send_freeplay_turn_prompt(channel, gs: game_state.GameState) -> None:
@@ -297,6 +429,9 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
             gs.record_clarification_reply(pc.id, text)
         if not await _ensure_freeplay_turn(channel, gs, pc, user, continue_pending):
             log.info("process_action: freeplay turn check rejected for %s", pc.name)
+            return
+        if not clarif_open and await _try_accept_available_quest(channel, user, gs, pc, text):
+            log.info("process_action: accepted available quest via direct text")
             return
 
     clarification = gs.get_clarification(actor_id)
@@ -433,6 +568,7 @@ async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
         await _send_dice_animation(channel, result.natural)
         prose = await _narrate_into_log(gs, result)
         await interaction.edit_original_response(content=None, embed=embeds.result_embed(result, prose))
+        _maybe_apply_quest_check(gs, result)
         gs.complete_freeplay_action(pc.id)
         await _persist(gs)
         await _maybe_resolve_climax(channel, gs, result)

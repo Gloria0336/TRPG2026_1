@@ -20,6 +20,39 @@ from ..logging_setup import get_logger
 log = get_logger("state")
 
 
+def _dashboard_quest(q: dict) -> dict:
+    seed = q.get("seed") or {}
+    details = q.get("details") or {}
+    accepted = q.get("status") in {"accepted", "completed", "failed", "expired"}
+    title = details.get("title") or seed.get("title_hint") or q.get("dedupe_key")
+    summary = seed.get("premise") or details.get("objective") or seed.get("objective_hint") or ""
+    payload = {
+        "id": q.get("id"),
+        "dedupe_key": q.get("dedupe_key"),
+        "scene_id": q.get("scene_id"),
+        "giver": q.get("giver") or seed.get("giver") or details.get("giver") or "",
+        "status": q.get("status"),
+        "visibility": q.get("visibility"),
+        "detail_state": q.get("detail_state"),
+        "title": title,
+        "summary": summary,
+        "objective": details.get("objective") or seed.get("objective_hint") or "",
+        "reward": details.get("reward") or seed.get("reward_hint") or "",
+        "acceptance_mode": seed.get("acceptance_mode") or "direct_accept",
+        "required_check": seed.get("required_check"),
+        "tags": q.get("tags") or {},
+    }
+    if accepted:
+        payload["details"] = {
+            "known_info": details.get("known_info") or [],
+            "details": details.get("details") or [],
+            "next_steps": details.get("next_steps") or [],
+            "success_conditions": details.get("success_conditions") or [],
+            "failure_risks": details.get("failure_risks") or [],
+        }
+    return payload
+
+
 # ───────────────────────── Scene ─────────────────────────
 @dataclass
 class Scene:
@@ -421,13 +454,14 @@ class GameState:
                 for user_id, pc_id in self.players.items()
             ],
             "combat": combat,
-            "log": [
+                "log": [
                 {
                     "id": e.id, "actor": e.actor_name, "kind": e.kind,
                     "summary": e.summary, "narration": e.narration, "ts": e.ts,
                 }
                 for e in self.event_log[-60:]
             ],
+            "quests": [_dashboard_quest(q) for q in store.list_quests()],
         }
 
     # ── JSON snapshot (no DB) ──

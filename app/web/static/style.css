@@ -130,6 +130,37 @@ code { background: #00000040; padding: 1px 6px; border-radius: 5px; }
 .initiative .hp { margin-left: auto; color: var(--muted); font-size: .85rem; }
 .initiative li.dead { opacity: .4; text-decoration: line-through; }
 
+/* Quest board */
+.quest-list { display: grid; gap: 10px; }
+.quest {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  padding: 11px 13px;
+}
+.quest.accepted { border-left-color: var(--green); }
+.quest.awaiting_check { border-left-color: var(--gold); }
+.quest.failed, .quest.expired { border-left-color: var(--red); }
+.quest-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.quest-head strong { color: var(--ink); }
+.quest-head span, .quest-meta { color: var(--muted); font-size: .82rem; }
+.quest p { margin: 6px 0; color: var(--ink); }
+.quest-reward { color: var(--gold); font-size: .9rem; margin-top: 4px; }
+.quest-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.quest-tags span {
+  background: rgba(91,143,176,.16);
+  border: 1px solid rgba(91,143,176,.25);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: .74rem;
+  padding: 2px 7px;
+}
+.quest-details { margin-top: 10px; color: var(--muted); }
+.quest-detail { margin-top: 7px; }
+.quest-detail ul { margin: 4px 0 0 18px; padding: 0; }
+.quest-detail li { margin: 2px 0; }
+
 /* Log */
 .log-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column-reverse; gap: 8px; max-height: 460px; overflow-y: auto; }
 .log-list li { background: var(--panel-2); border-left: 3px solid var(--border); border-radius: 6px; padding: 8px 12px; }

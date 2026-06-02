@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from ..config import settings
+from ..content import quest_taxonomy
 from ..logging_setup import get_logger
 
 log = get_logger("db")
@@ -86,6 +87,7 @@ def reset_world() -> None:
         c.execute("DELETE FROM entities")
         c.execute("DELETE FROM scene_state")
         c.execute("DELETE FROM event_log")
+        c.execute("DELETE FROM quests")
         c.execute("DELETE FROM memory_chunks")
         c.execute("DELETE FROM mention_tally")
         c.commit()
@@ -138,6 +140,178 @@ def _event_to_dict(row: sqlite3.Row) -> dict:
     except json.JSONDecodeError:
         d["data"] = {}
     return d
+
+
+def _quest_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    for key in ("seed", "details", "tags"):
+        try:
+            d[key] = json.loads(d.get(key) or "{}")
+        except json.JSONDecodeError:
+            d[key] = {}
+    d["tags"] = quest_taxonomy.normalize_tags(d.get("tags"))
+    return d
+
+
+def fallback_quest_details(seed: dict) -> dict:
+    """Build a minimal executable quest card from a quest seed."""
+    return {
+        "title": seed.get("title_hint") or "Unnamed Quest",
+        "giver": seed.get("giver") or "",
+        "objective": seed.get("objective_hint") or seed.get("premise") or "",
+        "known_info": [x for x in [
+            seed.get("premise"),
+            seed.get("known_constraints"),
+            f"Stakes: {seed.get('stakes')}" if seed.get("stakes") else "",
+        ] if x],
+        "details": [seed.get("premise") or seed.get("objective_hint") or ""],
+        "next_steps": [seed.get("objective_hint") or "Follow up with the quest giver."],
+        "success_conditions": [seed.get("objective_hint") or "Resolve the request."],
+        "failure_risks": [seed.get("stakes") or "The opportunity may worsen or expire."],
+        "reward": seed.get("reward_hint") or "",
+        "tags": quest_taxonomy.normalize_tags(seed.get("tags")),
+    }
+
+
+def upsert_quest_seed(
+    *,
+    dedupe_key: str,
+    seed: dict,
+    source_event_id: str | None = None,
+    scene_id: str | None = None,
+    giver: str = "",
+    status: str = "available",
+    visibility: str = "summary",
+    detail_state: str = "pending_agent",
+) -> dict:
+    """Create or refresh a quest from a GM quest seed."""
+    key = (dedupe_key or "").strip() or f"quest_{uuid.uuid4().hex[:10]}"
+    if status not in quest_taxonomy.QUEST_STATUSES:
+        status = "available"
+    if detail_state not in quest_taxonomy.QUEST_DETAIL_STATES:
+        detail_state = "pending_agent"
+    tags = quest_taxonomy.normalize_tags((seed or {}).get("tags"))
+    now = _now()
+    with _lock:
+        c = _c()
+        row = c.execute("SELECT * FROM quests WHERE dedupe_key=?", (key,)).fetchone()
+        if row:
+            quest_id = row["id"]
+            current = _quest_to_dict(row)
+            if current.get("status") in ("accepted", "completed", "failed", "expired"):
+                status = current["status"]
+            if current.get("detail_state") == "ready":
+                detail_state = "ready"
+            c.execute(
+                "UPDATE quests SET source_event_id=?, scene_id=?, giver=?, status=?, "
+                "visibility=?, seed=?, tags=?, detail_state=?, updated_ts=? WHERE id=?",
+                (
+                    source_event_id or row["source_event_id"],
+                    scene_id or row["scene_id"],
+                    giver or row["giver"],
+                    status,
+                    visibility,
+                    json.dumps(seed or {}, ensure_ascii=False),
+                    json.dumps(tags, ensure_ascii=False),
+                    detail_state,
+                    now,
+                    quest_id,
+                ),
+            )
+        else:
+            quest_id = f"quest_{uuid.uuid4().hex[:10]}"
+            c.execute(
+                "INSERT INTO quests (id, dedupe_key, source_event_id, scene_id, giver, "
+                "status, visibility, seed, details, tags, detail_state, created_ts, updated_ts) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    quest_id,
+                    key,
+                    source_event_id,
+                    scene_id,
+                    giver,
+                    status,
+                    visibility,
+                    json.dumps(seed or {}, ensure_ascii=False),
+                    "{}",
+                    json.dumps(tags, ensure_ascii=False),
+                    detail_state,
+                    now,
+                    now,
+                ),
+            )
+        c.commit()
+        saved = c.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
+    return _quest_to_dict(saved)  # type: ignore[arg-type]
+
+
+def set_quest_details(quest_id: str, details: dict, *, detail_state: str = "ready") -> dict | None:
+    if detail_state not in quest_taxonomy.QUEST_DETAIL_STATES:
+        detail_state = "ready"
+    tags = quest_taxonomy.normalize_tags((details or {}).get("tags"))
+    with _lock:
+        c = _c()
+        row = c.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
+        if not row:
+            return None
+        current = _quest_to_dict(row)
+        merged_tags = quest_taxonomy.normalize_tags({**current.get("tags", {}), **tags})
+        c.execute(
+            "UPDATE quests SET details=?, tags=?, detail_state=?, updated_ts=? WHERE id=?",
+            (
+                json.dumps(details or {}, ensure_ascii=False),
+                json.dumps(merged_tags, ensure_ascii=False),
+                detail_state,
+                _now(),
+                quest_id,
+            ),
+        )
+        c.commit()
+        saved = c.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
+    return _quest_to_dict(saved) if saved else None
+
+
+def update_quest_status(quest_id: str, status: str) -> dict | None:
+    if status not in quest_taxonomy.QUEST_STATUSES:
+        return None
+    with _lock:
+        c = _c()
+        if c.execute("SELECT id FROM quests WHERE id=?", (quest_id,)).fetchone() is None:
+            return None
+        c.execute("UPDATE quests SET status=?, updated_ts=? WHERE id=?", (status, _now(), quest_id))
+        c.commit()
+        saved = c.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
+    return _quest_to_dict(saved) if saved else None
+
+
+def accept_quest(quest_id: str) -> dict | None:
+    quest = update_quest_status(quest_id, "accepted")
+    if quest and quest.get("detail_state") == "pending_agent" and not quest.get("details"):
+        return set_quest_details(
+            quest_id,
+            fallback_quest_details(quest.get("seed") or {}),
+            detail_state="details_degraded",
+        )
+    return quest
+
+
+def get_quest(quest_id: str) -> dict | None:
+    with _lock:
+        c = _c()
+        row = c.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
+    return _quest_to_dict(row) if row else None
+
+
+def list_quests(*, scene_id: str | None = None) -> list[dict]:
+    with _lock:
+        c = _c()
+        if scene_id is None:
+            rows = c.execute("SELECT * FROM quests ORDER BY created_ts").fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM quests WHERE scene_id IS ? ORDER BY created_ts", (scene_id,)
+            ).fetchall()
+    return [_quest_to_dict(r) for r in rows]
 
 
 # ───────────────────────── entities ─────────────────────────
