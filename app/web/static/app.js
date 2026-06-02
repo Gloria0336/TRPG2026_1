@@ -21,6 +21,10 @@ function apiUrl(path) {
   return API_BASE ? `${API_BASE}${path}` : path;
 }
 
+const FETCH_OPTIONS = API_BASE
+  ? { headers: { "ngrok-skip-browser-warning": "1" } }
+  : {};
+
 const NAME_ZH = {
   "Bram Ironwood": "布拉姆·鐵木",
   "Lyra Dawnbringer": "萊拉·曦光使者",
@@ -381,16 +385,35 @@ function renderLog(e) {
 }
 
 function connect() {
-  fetch(apiUrl("/api/state"))
+  let polling = false;
+
+  const fetchState = () => fetch(apiUrl("/api/state"), FETCH_OPTIONS)
     .then((r) => {
       if (!r.ok) throw new Error(`state request failed: ${r.status}`);
       return r.json();
     })
-    .then(render)
+    .then((state) => {
+      setStatus(true);
+      render(state);
+    })
     .catch(() => {
       setStatus(false);
       render(null);
     });
+
+  const startPolling = () => {
+    if (polling) return;
+    polling = true;
+    fetchState();
+    window.setInterval(fetchState, 2000);
+  };
+
+  fetchState();
+
+  if (API_BASE.includes("ngrok-free.")) {
+    startPolling();
+    return;
+  }
 
   const es = new EventSource(apiUrl("/api/stream"));
   es.addEventListener("state", (ev) => {
@@ -398,7 +421,10 @@ function connect() {
     render(JSON.parse(ev.data));
   });
   es.onopen = () => setStatus(true);
-  es.onerror = () => { setStatus(false); };
+  es.onerror = () => {
+    setStatus(false);
+    startPolling();
+  };
 }
 
 connect();
