@@ -361,6 +361,163 @@ def promote_mention(scene_id: str | None, name: str, kind: str) -> str | None:
     return ent_id
 
 
+# ───────────────────────── conditions (mechanical flags on entities) ─────────────────────────
+# Conditions are stored inside the existing `flags` JSON column. Two keys:
+#   "conditions":     list[str] — active condition ids (incl. parametric "loyal_to:X")
+#   "condition_meta": dict[str, dict] — per-condition data (level, source, duration)
+# This keeps the schema stable while letting the engine reason about leveled and
+# time-bounded effects.
+_CONDITIONS_KEY = "conditions"
+_CONDITION_META_KEY = "condition_meta"
+
+
+def _flags_with_conditions(ent: dict) -> dict:
+    flags = dict(ent.get("flags") or {})
+    raw = flags.get(_CONDITIONS_KEY) or []
+    seen: list[str] = []
+    for cid in raw:
+        if isinstance(cid, str) and cid and cid not in seen:
+            seen.append(cid)
+    flags[_CONDITIONS_KEY] = seen
+    meta = flags.get(_CONDITION_META_KEY) or {}
+    flags[_CONDITION_META_KEY] = {k: dict(v) for k, v in meta.items() if isinstance(v, dict)}
+    return flags
+
+
+def get_conditions(ent_id: str) -> list[str]:
+    ent = get_entity_by_id(ent_id)
+    if not ent:
+        return []
+    return list(_flags_with_conditions(ent).get(_CONDITIONS_KEY, []))
+
+
+def get_condition_meta(ent_id: str) -> dict[str, dict]:
+    ent = get_entity_by_id(ent_id)
+    if not ent:
+        return {}
+    return dict(_flags_with_conditions(ent).get(_CONDITION_META_KEY, {}))
+
+
+def has_condition(ent_id: str, condition_id: str) -> bool:
+    return condition_id in get_conditions(ent_id)
+
+
+def _write_flags(ent: dict, conds: list[str], meta: dict[str, dict]) -> None:
+    flags = dict(ent.get("flags") or {})
+    flags[_CONDITIONS_KEY] = list(conds)
+    flags[_CONDITION_META_KEY] = {k: dict(v) for k, v in meta.items() if isinstance(v, dict)}
+    upsert_entity(
+        id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
+        aliases=ent.get("aliases", []), status=ent["status"],
+        location_id=ent.get("location_id"), disposition=ent.get("disposition"),
+        flags=flags, notes=ent.get("notes", ""),
+        first_seen_event_id=ent.get("first_seen_event_id"),
+    )
+
+
+def add_condition(
+    ent_id: str,
+    condition_id: str,
+    *,
+    level: int | None = None,
+    source: str | None = None,
+    duration: int | None = None,
+) -> bool:
+    """Attach a condition to an entity, optionally with meta. Returns True if newly added
+    (or if meta was supplied for an existing condition — meta is merged in-place)."""
+    ent = get_entity_by_id(ent_id)
+    if not ent or not condition_id:
+        return False
+    bundle = _flags_with_conditions(ent)
+    conds = list(bundle.get(_CONDITIONS_KEY, []))
+    meta = dict(bundle.get(_CONDITION_META_KEY, {}))
+    newly_added = condition_id not in conds
+    if newly_added:
+        conds.append(condition_id)
+
+    if level is not None or source is not None or duration is not None:
+        slot = dict(meta.get(condition_id, {}))
+        if level is not None:
+            slot["level"] = int(level)
+        if source is not None:
+            slot["source"] = source
+        if duration is not None:
+            slot["duration"] = int(duration)
+        meta[condition_id] = slot
+    elif newly_added and condition_id not in meta:
+        # Keep meta in sync (empty slot) so later upgrades work without re-fetching.
+        meta[condition_id] = {}
+
+    if not newly_added and meta == bundle.get(_CONDITION_META_KEY, {}):
+        return False
+    _write_flags(ent, conds, meta)
+    log.info("entity %s gained condition %s meta=%s", ent_id, condition_id, meta.get(condition_id))
+    return True
+
+
+def remove_condition(ent_id: str, condition_id: str) -> bool:
+    """Detach a condition from an entity. Returns True if it was present."""
+    ent = get_entity_by_id(ent_id)
+    if not ent:
+        return False
+    bundle = _flags_with_conditions(ent)
+    conds = list(bundle.get(_CONDITIONS_KEY, []))
+    meta = dict(bundle.get(_CONDITION_META_KEY, {}))
+    if condition_id not in conds:
+        return False
+    conds = [c for c in conds if c != condition_id]
+    meta.pop(condition_id, None)
+    _write_flags(ent, conds, meta)
+    log.info("entity %s lost condition %s", ent_id, condition_id)
+    return True
+
+
+def tick_conditions(ent_id: str) -> list[str]:
+    """Advance every duration-bound condition by one turn; remove ones that hit zero.
+    Returns the list of condition ids that expired."""
+    ent = get_entity_by_id(ent_id)
+    if not ent:
+        return []
+    bundle = _flags_with_conditions(ent)
+    conds = list(bundle.get(_CONDITIONS_KEY, []))
+    # Deep copy so mutating `meta[cid]["duration"]` doesn't silently update the
+    # bundle reference and defeat the dirty check below.
+    meta = {k: dict(v) for k, v in (bundle.get(_CONDITION_META_KEY, {}) or {}).items()}
+    expired: list[str] = []
+    mutated = False
+    for cid in list(conds):
+        slot = meta.get(cid) or {}
+        if "duration" not in slot:
+            continue
+        d = int(slot["duration"]) - 1
+        mutated = True
+        if d <= 0:
+            expired.append(cid)
+            conds.remove(cid)
+            meta.pop(cid, None)
+        else:
+            slot["duration"] = d
+            meta[cid] = slot
+    if mutated:
+        _write_flags(ent, conds, meta)
+    return expired
+
+
+def get_conditions_by_ref(scene_id: str | None, ref: str) -> tuple[str | None, list[str]]:
+    """Resolve a free-text target reference and return (entity_id, conditions)."""
+    ent = find_by_ref(scene_id, ref)
+    if not ent:
+        return None, []
+    return ent["id"], list(_flags_with_conditions(ent).get(_CONDITIONS_KEY, []))
+
+
+def get_meta_by_ref(scene_id: str | None, ref: str) -> dict[str, dict]:
+    ent = find_by_ref(scene_id, ref)
+    if not ent:
+        return {}
+    return dict(_flags_with_conditions(ent).get(_CONDITION_META_KEY, {}))
+
+
 def apply_delta(scene_id: str | None, delta: dict) -> str | None:
     """Apply one validated state delta. Resolves entity by ref; can register a new
     one when `register_kind` is given. Returns the affected entity id (or None).
@@ -401,6 +558,15 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
         flags=ent.get("flags", {}), notes=notes,
         first_seen_event_id=ent.get("first_seen_event_id"),
     )
+    # Mechanical condition deltas. Done after the upsert so the latest flags blob
+    # is what add/remove read; unknown ids were already filtered by the schema
+    # validator, but we still gate on str/non-empty here for direct dict callers.
+    for cid in delta.get("add_conditions") or []:
+        if isinstance(cid, str) and cid:
+            add_condition(ent["id"], cid)
+    for cid in delta.get("remove_conditions") or []:
+        if isinstance(cid, str) and cid:
+            remove_condition(ent["id"], cid)
     return ent["id"]
 
 

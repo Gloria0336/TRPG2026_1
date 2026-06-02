@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES
+from ..engine import conditions as cond
 from ..engine.rules_5e import DC_ANCHORS
 
 # 5e skills the parser may pick as an `approach`.
@@ -28,6 +29,10 @@ class IntentParse(BaseModel):
     action: str | None = None
     target: str | None = None
     approach: str | None = None              # a 5e skill name when known
+    # The specific subject of the action — what is being asked about, examined, or
+    # talked into. Optional; only set when the player named one. Lets the narrator
+    # render "asks about her underwear color" instead of just "asks a question".
+    topic: str | None = None
     is_attack: bool = False                  # True if this is an attempt to attack/fight
     # Tier-A only: does this action need a d20 check, or is it a trivial/uncontested
     # beat that simply happens? The model proposes; the engine's gate (resolution.
@@ -68,6 +73,12 @@ class EntityStateDelta(BaseModel):
     disposition: str | None = None       # one of DISPOSITIONS
     location_id: str | None = None
     note: str | None = None              # short fact to append to the entity's notes
+    # Mechanical conditions the narration newly describes (e.g. the figure "was
+    # tied up" → add_conditions=["restrained"]; "woke up" → remove_conditions=
+    # ["unconscious"]). Unknown ids are filtered server-side; the model can't
+    # invent new mechanics this way.
+    add_conditions: list[str] = Field(default_factory=list)
+    remove_conditions: list[str] = Field(default_factory=list)
     # When the narration introduces a brand-new entity, the model may register it:
     register_kind: str | None = None     # one of ENTITY_KINDS → triggers registration
     register_name: str | None = None
@@ -88,10 +99,17 @@ class EntityStateDelta(BaseModel):
     def _valid_kind(cls, v: str | None) -> str | None:
         return v if v in ENTITY_KINDS else None
 
-    @field_validator("aliases", mode="before")
+    @field_validator("aliases", "add_conditions", "remove_conditions", mode="before")
     @classmethod
     def _none_to_empty(cls, value: object) -> object:
         return [] if value is None else value
+
+    @field_validator("add_conditions", "remove_conditions")
+    @classmethod
+    def _drop_unknown_conditions(cls, value: list[str]) -> list[str]:
+        # Filter out anything the catalog doesn't know; a creative model can't
+        # widen the mechanical vocabulary by inventing flag names.
+        return [c for c in value if isinstance(c, str) and cond.known(c)]
 
     def is_noop(self) -> bool:
         """True when the delta carries nothing actionable."""
@@ -99,7 +117,10 @@ class EntityStateDelta(BaseModel):
             return False
         if not self.entity_ref:
             return True
-        return not any((self.status, self.disposition, self.location_id, self.note))
+        return not any((
+            self.status, self.disposition, self.location_id, self.note,
+            self.add_conditions, self.remove_conditions,
+        ))
 
 
 class EntityExtraction(BaseModel):
@@ -116,6 +137,9 @@ class EntityExtraction(BaseModel):
         return [d for d in self.deltas if not d.is_noop()]
 
 
+_KNOWN_CONDITION_IDS = sorted(cond.CATALOG.keys())
+
+
 EXTRACT_JSON_SHAPE = (
     '{\n'
     '  "deltas": [\n'
@@ -124,6 +148,8 @@ EXTRACT_JSON_SHAPE = (
     f'      "status": one of {list(ENTITY_STATUSES)} | null,\n'
     f'      "disposition": one of {list(DISPOSITIONS)} | null,\n'
     '      "note": one short factual clause to remember | null,\n'
+    f'      "add_conditions": subset of {_KNOWN_CONDITION_IDS} | []  // attach mechanical flags the narration newly implies,\n'
+    '      "remove_conditions": [condition ids the narration shows are gone] | [],\n'
     f'      "register_kind": one of {list(ENTITY_KINDS)} | null  // only for a NEW entity,\n'
     '      "register_name": name of the new entity | null,\n'
     '      "aliases": [other names for the new entity]\n'
@@ -140,6 +166,7 @@ INTENT_JSON_SHAPE = (
     '  "action": short verb like "persuade" | "search" | "attack" | null,\n'
     '  "target": who/what is targeted, or null,\n'
     '  "approach": one 5e skill from the allowed list, or null,\n'
+    '  "topic": the specific subject of the action when the player named one (e.g. "內褲顏色", "商隊去向", "他的名字"), or null,\n'
     '  "is_attack": true if the player is trying to attack/fight, else false,\n'
     '  "needs_check": false ONLY for a trivial, uncontested, no-risk action; else true,\n'
     '  "candidates": [2-4 concrete method options]   // tier B only,\n'

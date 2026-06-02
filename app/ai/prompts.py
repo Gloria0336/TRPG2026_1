@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from ..config import settings
 from ..db import store
+from ..engine import conditions as cond
 from ..logging_setup import truncate
 from .schemas import ALLOWED_SKILLS, EXTRACT_JSON_SHAPE, INTENT_JSON_SHAPE
 
@@ -24,11 +25,44 @@ _STATUS_ZH = {
 }
 
 
+def current_location_label(state: "GameState") -> str:
+    """Human-readable label for the party's current place. Prefers the live location
+    entity name (clean — "鎏金酒杯酒館") over the authored scene title ("場景 1：鎏金
+    酒杯酒館") so AI prompts read like a place, not a script chapter."""
+    try:
+        loc = store.get_entity_by_id(state.current_location_id)
+        if loc and loc.get("name"):
+            return loc["name"]
+    except Exception:  # noqa: BLE001 — memory layer must never break prompts
+        pass
+    return state.scene.title
+
+
+def known_exits(state: "GameState", *, limit: int = 8) -> list[dict]:
+    """Locations the party could plausibly travel to next. Excludes the current
+    location; locations are global, so this is the full registry minus 'here'."""
+    try:
+        all_locs = store.get_locations()
+    except Exception:  # noqa: BLE001
+        return []
+    here = state.current_location_id
+    return [e for e in all_locs if e["id"] != here][:limit]
+
+
+def _entity_conditions(e: dict) -> list[str]:
+    flags = e.get("flags") or {}
+    raw = flags.get("conditions") if isinstance(flags, dict) else None
+    return [c for c in (raw or []) if isinstance(c, str)]
+
+
 def _entity_label(e: dict) -> str:
     bits = []
     if e.get("disposition"):
         bits.append(_DISPOSITION_ZH.get(e["disposition"], e["disposition"]))
     bits.append(_STATUS_ZH.get(e.get("status", "present"), e["status"]))
+    conds = _entity_conditions(e)
+    if conds:
+        bits.append("狀態：" + "、".join(cond.label(c) for c in conds))
     tag = "，".join(bits)
     line = f"- {e['name']}（{tag}）"
     if e.get("notes"):
@@ -62,19 +96,45 @@ def compose_scene_summary(state: "GameState") -> str:
 
 
 # ───────────────────────── Intent parser ─────────────────────────
-INTENT_SYSTEM = f"""You are the INTENT PARSER for a Dungeons & Dragons 5e game run by a \
+INTENT_SYSTEM = f"""You are the INTENT PARSER for a living_world game run by a \
 program. Your ONLY job is to turn a player's natural-language message into a structured \
 intent. You must NEVER decide whether an action succeeds, NEVER narrate outcomes, and \
 NEVER invent facts. The program rolls all dice and owns all numbers.
 
 Classify the message into one tier:
 - "A" (clear action): the action, its target, and a sensible skill/approach are all clear. \
-Fill action/target/approach.
+Fill action/target/approach. Optionally fill `topic` with the specific subject of the \
+action (the thing being asked about / examined / talked into) when the player named one \
+— e.g. action="詢問", target="兜帽客", topic="商隊去向" / "內褲顏色" / "他的名字".
 - "B" (clear goal, unclear method): you know what they want but not how. Provide 2-4 \
 concrete `candidates` (e.g. for "get inside": ["pick the lock", "climb the wall", \
 "persuade the guard"]).
-- "C" (unclear intent): you can't tell what they want. Ask one short `question` and give \
-2-4 `options`.
+- "C" (unclear intent): you can't tell what they want. Write `question` as a SHORT GM \
+follow-up in the GM's narrative voice (1-2 sentences, Traditional Chinese): use an NPC \
+reaction, sensory hint, or in-fiction question to invite the player to elaborate. NEVER \
+phrase it as "請選擇 A/B/C/D" or list mechanical skills. `options` is OPTIONAL — leave it \
+empty by default; only include 2-3 SHORT example phrasings (≤8 chars each) when the player \
+clearly needs a hint. The player will reply with another natural-language /action, and \
+you'll re-interpret with that reply added to the CLARIFICATION HISTORY. Aim to converge \
+toward tier A within 1-2 rounds.
+
+PLAYER AGENCY (anti-paternalism — read this carefully):
+- The player has full AUTHORIAL agency over their character's actions. Silly, embarrassing, \
+taboo, off-topic, or risky actions are ALL legitimate so long as the verb + target are \
+identifiable from the literal text.
+- If the message has an identifiable verb + target, classify as tier A (filling `topic` \
+with the specific subject). Do NOT downgrade to tier C just because the action seems \
+off-script for the current plot. Do NOT substitute a "more reasonable" or "more relevant" \
+action for what the player wrote. The engine handles consequences via cost/band and the \
+narrator handles social fallout in prose — that is not your job.
+- Examples that LOOK weird but are tier A, not tier C:
+  - "詢問兜帽客穿什麼顏色的內褲" → tier A, action="詢問", target="兜帽客", \
+approach="persuasion", topic="內褲顏色"
+  - "問守衛他穿不穿襪子" → tier A, action="詢問", target="守衛", topic="是否穿襪子"
+  - "舔門把" → tier A, action="舔", target="門把", approach="perception" (taste-as-sensing)
+  - "向牧師打聽他的私生活" → tier A, action="打聽", target="牧師", topic="私生活"
+- Only fall to tier C when the LITERAL text cannot resolve to a verb+target — "我做點事" \
+or "嗯..." or a one-word noun with no action.
 
 `approach` must be one of these 5e skills when applicable: {", ".join(ALLOWED_SKILLS)}.
 
@@ -89,14 +149,30 @@ persuading, deceiving, intimidating, and picking locks ALWAYS need a check.
 - When unsure, set `needs_check` TRUE. The program may still force a check; it never \
 forces a free success.
 
-Set `implausible` TRUE when the message depends on a FALSE PREMISE: equipment the ACTOR \
-does not carry (check the actor's INVENTORY), or a fact/object/person not established in \
-the SCENE. Example: "I detonate the C4 I hid in the mine" when the actor has no explosives \
-and no such thing is in the scene. When `implausible` is true, do NOT invent an options \
-menu that treats the false premise as real — the program will gently redirect the player. \
-You may still fill `action`/`target` with the player's apparent goal (e.g. action="enter", \
-target="the mine") so the redirect can suggest legitimate approaches. Possessing an item \
-in INVENTORY is NOT implausible. A merely risky-but-possible action is NOT implausible.
+`implausible` is STRICT — only TRUE when the world's STRUCTURED STATE contradicts the \
+action. Two narrow cases:
+- The action requires equipment the actor's INVENTORY does not list (e.g. "I detonate \
+the C4" with no explosives in inventory).
+- The action presupposes a target/object/fact not present in the SCENE entities or the \
+established fiction (e.g. "I open the chest" with no chest registered, "I kill the \
+dragon" with no dragon present).
+
+`implausible` is NOT a vibe check. The following are NOT implausible, no matter how \
+strange they read — return tier A and let the engine + narrator handle consequences:
+- Embarrassing or taboo asks ("問兜帽客內褲顏色", "問牧師性生活")
+- Off-topic actions that don't advance the plot ("舔門把", "在地上打滾")
+- Risky or stupid moves ("徒手抓刀刃", "對著火堆深呼吸")
+- Insulting an NPC, propositioning an NPC, breaking decorum
+- Physically possible but absurd attempts ("跟桌子說話", "對牆壁施展魅惑")
+
+A merely risky-but-possible action is NOT implausible. A socially awkward action is NOT \
+implausible. Possessing an item in INVENTORY is NOT implausible. When in doubt, return \
+FALSE — the engine will surface natural consequences via DC, cost band, and narration.
+
+When `implausible` IS true, do NOT invent an options menu that treats the false premise \
+as real — the program will gently redirect the player. You may still fill `action`/`target` \
+with the player's apparent goal (e.g. action="enter", target="the mine") so the redirect \
+can suggest legitimate approaches.
 
 Set `is_attack` true ONLY if the player is trying to physically attack/fight someone.
 Only set `suggested_dc` (one of 5/10/15/20/25/30/35) for unusual actions not covered \
@@ -107,7 +183,52 @@ Respond with ONLY a JSON object of this exact shape (no prose, no markdown fence
 {INTENT_JSON_SHAPE}"""
 
 
-def intent_context(state: "GameState", actor: "Character", text: str) -> str:
+def _condition_brief(present: list[dict]) -> str:
+    """Lines like '- 兜帽客：催眠（社交詢問直接回應；無法主動行動）' so the parser
+    treats already-controlled NPCs as no-check social targets."""
+    lines: list[str] = []
+    for e in present:
+        conds = _entity_conditions(e)
+        if not conds:
+            continue
+        labels = [
+            f"{cond.label(c)}（{cond.CATALOG[c].description_zh}）"
+            for c in conds if c in cond.CATALOG
+        ]
+        if labels:
+            lines.append(f"- {e['name']}：" + "；".join(labels))
+    return "\n".join(lines)
+
+
+def _clarification_block(history: list[dict] | None) -> str:
+    """Format the open follow-up thread for the parser: each turn = one GM
+    question (the prior round's clarification) + the player's reply that came
+    after. Lets the parser converge instead of asking the same question twice."""
+    if not history:
+        return ""
+    lines: list[str] = []
+    for i, turn in enumerate(history, 1):
+        gm = (turn.get("gm") or "").strip()
+        pl = (turn.get("player") or "").strip()
+        if gm:
+            lines.append(f"  round {i} GM: {truncate(gm, 160)}")
+        if pl:
+            lines.append(f"  round {i} player: {truncate(pl, 160)}")
+    if not lines:
+        return ""
+    return (
+        "CLARIFICATION HISTORY (you are mid-conversation — use this to converge to "
+        "tier A this round; do NOT repeat the same question):\n" + "\n".join(lines)
+    )
+
+
+def intent_context(
+    state: "GameState",
+    actor: "Character",
+    text: str,
+    *,
+    clarification: list[dict] | None = None,
+) -> str:
     skills = ", ".join(sorted(actor.skill_prof.keys())) or "no special training"
     # Same source as the narrator (compose_scene_summary + live present entities), so the
     # parser can no longer be fed a stale scripted blurb while the fiction has moved on.
@@ -116,15 +237,47 @@ def intent_context(state: "GameState", actor: "Character", text: str) -> str:
     table = ", ".join(f"{k} (DC {v})" for k, v in state.scene.challenges.items()) or "none predefined"
     in_combat = "YES — this is a combat turn." if (state.combat and state.combat.active) else "no"
     carried = "、".join(actor.inventory) if getattr(actor, "inventory", None) else "（無特別裝備）"
-    return (
-        f"SCENE: {state.scene.title}\n{compose_scene_summary(state)}\n"
-        f"NPCs/targets present: {npcs}\n"
-        f"Known scene checks: {table}\n"
-        f"In combat: {in_combat}\n"
-        f"ACTOR: {actor.name} (proficient skills: {skills})\n"
-        f"ACTOR INVENTORY: {carried}\n"
-        f"PLAYER MESSAGE: \"{text}\""
-    )
+
+    # Reachable destinations. Listing aliases too lets the parser map free-text
+    # ("酒館"/"鎏金酒杯酒館") onto the same canonical place.
+    exits = known_exits(state)
+    if exits:
+        exit_lines = [
+            f"- {e['name']}" + (f"（別名：{', '.join(e['aliases'])}）" if e.get("aliases") else "")
+            for e in exits
+        ]
+        exits_block = (
+            "EXITS (places the party can travel to from here; emergent ones not "
+            "listed are also allowed):\n" + "\n".join(exit_lines)
+        )
+    else:
+        exits_block = "EXITS: (none recorded yet — naming a new place is fine)"
+
+    parts = [
+        f"LOCATION: {current_location_label(state)}",
+        compose_scene_summary(state),
+        f"NPCs/targets present: {npcs}",
+        exits_block,
+    ]
+    brief = _condition_brief(present)
+    if brief:
+        parts.append(
+            "TARGET CONDITIONS (mechanical — respect them):\n" + brief +
+            "\nIf the player addresses a target whose condition makes the check moot "
+            "(e.g. hypnotized → social auto-success), set needs_check=false and do NOT "
+            "offer威嚇/魅惑/洞察 options for that target."
+        )
+    parts += [
+        f"Known location checks: {table}",
+        f"In combat: {in_combat}",
+        f"ACTOR: {actor.name} (proficient skills: {skills})",
+        f"ACTOR INVENTORY: {carried}",
+    ]
+    cb = _clarification_block(clarification)
+    if cb:
+        parts.append(cb)
+    parts.append(f"PLAYER MESSAGE: \"{text}\"")
+    return "\n".join(parts)
 
 
 # ───────────────────────── Narrator (GM voice) ─────────────────────────
@@ -170,20 +323,20 @@ def _entities_block(state: "GameState") -> str:
     absent = [e for e in all_entities if e["status"] in store._ABSENT_STATUSES]
     lines = []
     if present:
-        lines.append("IN THE SCENE NOW:\n" + "\n".join(_entity_label(e) for e in present))
+        lines.append("HERE NOW:\n" + "\n".join(_entity_label(e) for e in present))
     if absent:
         gone = "、".join(e["name"] for e in absent)
-        lines.append(f"NO LONGER PRESENT (do NOT bring them back into the scene): {gone}")
+        lines.append(f"NO LONGER PRESENT (do NOT bring them back into this location): {gone}")
     return "\n".join(lines)
 
 
 def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     window = settings.narrate_context_window
     recent = state.event_log[-window:-1] if len(state.event_log) > 1 else []
-    history = "\n".join(_event_line(e) for e in recent) or "- (scene just beginning)"
+    history = "\n".join(_event_line(e) for e in recent) or "- (location just entered)"
     entities = _entities_block(state)
     parts = [
-        f"SCENE: {state.scene.title}\n{compose_scene_summary(state)}",
+        f"LOCATION: {current_location_label(state)}\n{compose_scene_summary(state)}",
     ]
     if entities:
         parts.append(entities)
@@ -200,6 +353,10 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     # verbatim so the narrator stays on the right beat (商人 vs 兜帽客 etc.).
     if result.raw_text:
         parts.append(f"  player said (verbatim, do not translate or invent): \"{result.raw_text}\"")
+    # When the player named a specific subject, surface it so the prose is literal
+    # ("asks about her underwear color") rather than generic ("asks a question").
+    if getattr(result, "topic", None):
+        parts.append(f"  topic (the specific subject — narrate it literally, do not soften): \"{result.topic}\"")
     parts.append(f"  mechanical summary: {result.summary}")
     if result.band:
         parts.append(f"  band: {result.band.value} (SUCCESS=clean, PARTIAL=succeeded with cost, FAILURE=did not achieve)")
@@ -235,20 +392,22 @@ any new mechanical outcome.
 - Keep it to 1-2 sentences. Be evocative but tight."""
 
 
-# ───────────────────────── Scene opener ─────────────────────────
-SCENE_SYSTEM = """You are the GAME MASTER opening a scene in a D&D 5e one-shot. Set the \
-scene in 2-4 atmospheric sentences based on the provided summary. Do not resolve any \
-actions or invent mechanics; just paint the picture and invite the players to act.
+# ───────────────────────── Location opener ─────────────────────────
+SCENE_SYSTEM = """You are the GAME MASTER establishing a LOCATION in a D&D 5e one-shot. \
+Paint the place in 2-4 atmospheric sentences based on the provided summary. Do not resolve \
+any actions or invent mechanics; just describe where the party finds themselves and invite \
+them to act. The party arrives at this location naturally as the story unfolds — frame it \
+as a place they have walked into, not a scripted scene.
 Write ONLY in Traditional Chinese."""
 
 
 def scene_context(state: "GameState") -> str:
     npcs = ", ".join(state.scene.npcs) if state.scene.npcs else "none"
     return (
-        f"SCENE TITLE: {state.scene.title}\n"
+        f"LOCATION: {current_location_label(state)}\n"
         f"SUMMARY: {state.scene.summary}\n"
         f"NPCs present: {npcs}\n"
-        "Open the scene now in Traditional Chinese:"
+        "Establish this location now in Traditional Chinese:"
     )
 
 
@@ -268,6 +427,11 @@ existing entities.
 - Set `status` to "departed" when someone leaves/flees/exits the scene, "dead" when they \
 die, "hidden" when they conceal themselves. Set `disposition` only when their attitude \
 clearly shifts.
+- Use `add_conditions` / `remove_conditions` ONLY when the narration shows the entity \
+*newly* gained or *clearly lost* a mechanical state — e.g. tied up → add ["restrained"], \
+the figure awoke → remove ["unconscious", "hypnotized"]. Pick ids from the allowed list \
+in the JSON shape; unknown ids are silently dropped. Do NOT re-report conditions the \
+entity already has.
 - Set `register_kind`/`register_name` for anything genuinely NEW and not already listed: \
 a person/creature/object that appears, OR a named place the narration introduces (use \
 `register_kind`:"location"). Reporting a new place is just a candidate — the engine \

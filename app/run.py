@@ -40,7 +40,7 @@ async def _serve_web() -> None:
 async def main() -> None:
     # Refuse to start a second instance: two bots on one token fight over the
     # gateway session, so player actions get split between processes and the
-    # trace file of the instance you're watching looks empty.
+    # active recording can look empty or incomplete.
     try:
         acquire_instance_lock()
     except AlreadyRunningError as exc:

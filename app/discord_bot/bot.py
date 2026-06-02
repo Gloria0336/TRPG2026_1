@@ -16,12 +16,58 @@ from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
 from ..engine.types import IntentTier
-from ..logging_setup import get_logger
+from ..logging_setup import finish_recording, get_logger, start_recording
 from ..state import game_state
 from . import dice_animations, embeds, i18n
 from .views import ChoiceView, RollView
 
 log = get_logger("bot")
+
+
+# Movement verbs the dispatcher treats as travel intents when paired with a
+# location-like target. "travel" is already the AI's canonical token (see prompts),
+# but the parser regularly returns less-marked verbs ("go"/"walk"/"follow"/"head"
+# in English; "前往"/"走"/"去"/"離開"/"出發"/"進入" in Chinese). We don't widen this
+# into "approach"/"reach" — those are too easily confused with non-travel intents.
+_TRAVEL_VERBS: frozenset[str] = frozenset({
+    "travel", "go", "walk", "move", "leave", "exit", "follow",
+    "enter", "depart", "head", "ride", "approach",
+    "前往", "走", "去", "離開", "出發", "進入", "跟隨", "移動", "出門",
+})
+
+
+def _looks_like_travel(gs, intent) -> bool:
+    """True when the player's intent reads as 'move to a place'.
+
+    Trigger conditions (any one is enough):
+    - intent.action is a known travel verb AND intent.target resolves to a known
+      location (canonical or alias).
+    - intent.action is a travel verb AND intent.target equals the current location
+      name — meaning "I leave here" (handled by _begin_travel's leave branch).
+    - intent.action is the literal "travel" — the original explicit channel.
+
+    Does NOT fire when the target is an in-scene person/object even if the verb
+    is "follow" (e.g. "I follow the bartender" — bartender is a person, not a
+    place). _begin_travel guards on store.find_location anyway.
+    """
+    if not intent.target:
+        return False
+    action = (intent.action or "").strip().lower()
+    if action == "travel":
+        return True
+    if action not in _TRAVEL_VERBS:
+        return False
+    # Target resolves to a registered location → travel
+    if store.find_location(intent.target) is not None:
+        return True
+    # Target equals the current location name → "leave here"
+    here = store.get_entity_by_id(gs.current_location_id)
+    if here:
+        names = [here.get("name", "")] + list(here.get("aliases") or [])
+        t = intent.target.strip().lower()
+        if any(n and (t in n.lower() or n.lower() in t) for n in names):
+            return True
+    return False
 
 intents = discord.Intents.default()
 intents.message_content = False
@@ -240,12 +286,24 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
             log.info("process_action: %s is down → death save", pc.name)
             await _resolve_combat_action(channel, user, gs, pc, action_name=None, target_ref=None, death_save=True)
             return
-    elif not await _ensure_freeplay_turn(channel, gs, pc, user, continue_pending):
-        log.info("process_action: freeplay turn check rejected for %s", pc.name)
-        return
+    else:
+        # If the player has an OPEN clarification thread, this /action is the
+        # free-form reply to the prior GM follow-up — treat it like a
+        # continuation (skip the "complete your previous option" block) and
+        # attach the text to the last GM question so the parser sees it.
+        clarif_open = gs.clarification_turn_count(pc.id) > 0
+        if clarif_open:
+            continue_pending = True
+            gs.record_clarification_reply(pc.id, text)
+        if not await _ensure_freeplay_turn(channel, gs, pc, user, continue_pending):
+            log.info("process_action: freeplay turn check rejected for %s", pc.name)
+            return
 
+    clarification = gs.get_clarification(actor_id)
     async with channel.typing():
-        intent, proposed_dc = await orchestrator.interpret(gs, actor_id, text)
+        intent, proposed_dc = await orchestrator.interpret(
+            gs, actor_id, text, clarification=clarification,
+        )
 
     log.info("process_action: dispatch intent.tier=%s action=%s target=%s approach=%s is_attack=%s implausible=%s proposed_dc=%s",
              intent.tier.value, intent.action, intent.target, intent.approach, intent.is_attack, intent.implausible, proposed_dc)
@@ -259,6 +317,9 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         return
 
     if intent.tier is IntentTier.B and intent.candidates:
+        # B tier (clear goal, unclear method) still uses ChoiceView — these are
+        # concrete method options the engine has narrowed down, not a GM follow-up.
+        gs.clear_clarification(pc.id)  # converged enough to enumerate methods
         label_map = {i18n.text(x): x for x in intent.candidates}
         labels = list(label_map)
 
@@ -273,26 +334,48 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         return
 
     if intent.tier is IntentTier.C:
-        opts = intent.options or ["四處觀察", "找人交談", "仔細檢查某樣東西"]
-        label_map = {i18n.text(x): x for x in opts}
-        labels = list(label_map)
+        # GM follow-up flow: post the parser's narrative question and lock the
+        # actor's turn. The player's NEXT /action will be treated as a free-form
+        # reply (continue_pending=True is set above when a thread is open) and
+        # re-interpreted with the growing CLARIFICATION HISTORY in the prompt.
+        #
+        # Convergence cap: if we've already exchanged MAX_CLARIFICATION_TURNS
+        # rounds without escaping tier C, give up — narrate a no-roll beat so
+        # play moves on rather than looping forever.
+        prior_turns = gs.clarification_turn_count(pc.id)
+        if prior_turns >= game_state.GameState.MAX_CLARIFICATION_TURNS:
+            log.info("process_action → C-tier cap (%d turns) → narrative fallback for %s",
+                     prior_turns, pc.name)
+            gs.clear_clarification(pc.id)
+            await _begin_narrative(channel, user, gs, pc, intent)
+            return
 
-        async def on_choice_c(interaction: discord.Interaction, label: str):
-            await interaction.response.edit_message(content=f"➡️ {i18n.name(pc.name)}：**{label}**", view=None)
-            await process_action(channel, user, actor_id, label_map.get(label, label), continue_pending=True)
+        question = i18n.text(intent.question) if intent.question else (
+            "（請描述你想做的事，可以直接打字回覆，例如「我抓住他的衣領」）"
+        )
+        # Optional hints — show as plain text under the question, NOT as buttons,
+        # so the player still types their own answer.
+        hints = intent.options or []
+        hint_line = ""
+        if hints:
+            hint_line = "\n💡 例如：" + "、".join(i18n.text(o) for o in hints[:3])
 
-        question = i18n.text(intent.question) if intent.question else "你想做什麼？"
+        gs.push_clarification(pc.id, question)
         if not in_combat:
             gs.begin_freeplay_action(pc.id)
-            await _persist(gs)
-        await channel.send(content=f"🤔 {question}（{user.mention}）", view=ChoiceView(user.id, labels, on_choice_c))
+        await _persist(gs)
+        await channel.send(f"🎭 {question}{hint_line}\n（{user.mention} 直接 `/action` 回覆即可）")
         return
+
+    # Tier A flowing through to resolution — the player's intent converged.
+    if not in_combat:
+        gs.clear_clarification(pc.id)
 
     if in_combat:
         log.info("process_action → _combat_declare")
         await _combat_declare(channel, user, gs, pc, intent, text)
-    elif intent.action == "travel" and intent.target:
-        log.info("process_action → _begin_travel target=%s", intent.target)
+    elif _looks_like_travel(gs, intent):
+        log.info("process_action → _begin_travel target=%s (verb=%s)", intent.target, intent.action)
         await _begin_travel(channel, user, gs, pc, intent)
     elif intent.is_attack and scenario.scene_by_id(gs.scene.id) and scenario.scene_by_id(gs.scene.id).get("encounter"):
         log.info("process_action → _begin_scene_combat (attack triggered encounter)")
@@ -393,17 +476,48 @@ async def _send_implausible_redirect(channel, user, gs, pc, intent) -> None:
     await channel.send(msg)
 
 
+def _resolve_travel_target(gs, target: str) -> dict | None:
+    """Map a free-text travel target to a location entity dict.
+
+    Special case: when the target reads as the current location ("走出酒館" while
+    standing in 酒館), it's a *leave* intent — we redirect to the location's
+    natural outside (the first known location that isn't here, falling back to an
+    auto-registered '外面'). Otherwise defer to the registry helper which
+    auto-creates emergent destinations on demand.
+    """
+    if not target or not target.strip():
+        return None
+    here = store.get_entity_by_id(gs.current_location_id)
+    if here:
+        names = [here.get("name", "")] + list(here.get("aliases") or [])
+        t = target.strip().lower()
+        if any(n and (t == n.lower() or t in n.lower() or n.lower() in t) for n in names):
+            # "leave here" — pick the nearest authored exit, else create a generic outside.
+            for other in store.get_locations():
+                if other["id"] != here["id"]:
+                    return other
+            return store.resolve_or_register_location(f"{here['name']}外")
+    return store.resolve_or_register_location(target)
+
+
 async def _begin_travel(channel, user, gs, pc, intent) -> None:
     """Free travel (design: location is first-class state). Resolve/register the
     destination as a location entity, move the party there, then open it — so the
-    structured scene follows the fiction instead of being left behind in the tavern."""
+    structured location follows the fiction instead of being left behind."""
     loc = None
     try:
-        loc = store.resolve_or_register_location(intent.target)
+        loc = _resolve_travel_target(gs, intent.target or "")
     except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
         log.warning("_begin_travel: resolve location failed (%s): %s", type(exc).__name__, exc)
     if loc is None:
         # Couldn't pin a destination — fall back to a plain no-roll beat.
+        await _begin_narrative(channel, user, gs, pc, intent)
+        return
+    if loc["id"] == gs.current_location_id:
+        # Resolver returned 'here' — the special-case logic above should have
+        # redirected, but in case of an alias collision we'd otherwise loop. Treat
+        # as a narrative non-move so play still advances.
+        log.info("_begin_travel: target resolved to current location %s — narrating in-place", loc["id"])
         await _begin_narrative(channel, user, gs, pc, intent)
         return
     log.info("_begin_travel: %s → location id=%s name=%s", pc.name, loc["id"], loc["name"])
@@ -682,6 +796,7 @@ async def start(interaction: discord.Interaction):
             "/start: replacing active campaign without Discord channel binding (channel_id=%s)",
             previous.channel_id,
         )
+    start_recording(channel_id=interaction.channel_id, actor=str(interaction.user.id))
     gs = game_state.reset_state(channel_id=interaction.channel_id)
     await interaction.response.send_message(embed=embeds.intro_embed())
     await interaction.followup.send(embed=embeds.roster_embed(gs), view=_join_view(interaction.channel))
@@ -850,6 +965,7 @@ async def finish(interaction: discord.Interaction):
         await interaction.response.send_message("🛑 已清除沒有 Discord 頻道綁定的舊戰役。現在可以再次使用 `/start`。")
     else:
         await interaction.response.send_message("🛑 已強制結束戰役。現在可以再次使用 `/start`。")
+    finish_recording(reason=f"/finish by {interaction.user.id}")
 
 
 @bot.tree.command(description="重新啟動機器人程序並重新讀取程式內容。")

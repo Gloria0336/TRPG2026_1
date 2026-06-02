@@ -4,7 +4,7 @@ Layered routing (§8.2): MODEL_INTENT (cheap) parses intent; MODEL_NARRATE (stro
 narrates. If AI is offline / unkeyed / errors out, we fall back to rule-based parsing
 and canned narration so a session never hard-stops — and so tests run without network.
 
-Every step is traced through `trpg.ai` so `logs/trace.log` shows exactly which stage
+Every step is traced through `trpg.ai` so the active `logs/trace_*.log` shows exactly which stage
 took the fallback path (AI disabled, HTTP failed, JSON malformed, schema rejected …).
 """
 from __future__ import annotations
@@ -162,9 +162,21 @@ async def _chat(model: str, system: str, user: str, *, json_mode: bool = False, 
 
 
 # ───────────────────────── Intent parsing ─────────────────────────
-async def interpret(state: GameState, actor_id: str, text: str) -> tuple[Intent, int | None]:
-    """Parse a player's message into a structured Intent (+ optional proposed DC)."""
-    log.info("interpret() actor=%s text=%r scene=%s", actor_id, text, state.scene.id)
+async def interpret(
+    state: GameState,
+    actor_id: str,
+    text: str,
+    *,
+    clarification: list[dict] | None = None,
+) -> tuple[Intent, int | None]:
+    """Parse a player's message into a structured Intent (+ optional proposed DC).
+
+    `clarification` is the open follow-up history for this actor (the prior GM
+    questions + the player's replies). The parser sees it and is expected to
+    converge toward tier A rather than re-ask the same question.
+    """
+    log.info("interpret() actor=%s text=%r scene=%s clarification_turns=%d",
+             actor_id, text, state.scene.id, len(clarification or []))
     actor = state.characters.get(actor_id)
     if actor is None:
         log.error("interpret: unknown actor_id=%s known=%s", actor_id, list(state.characters))
@@ -176,7 +188,7 @@ async def interpret(state: GameState, actor_id: str, text: str) -> tuple[Intent,
             raw = await _chat(
                 settings.model_intent,
                 prompts.INTENT_SYSTEM,
-                prompts.intent_context(state, actor, text),
+                prompts.intent_context(state, actor, text, clarification=clarification),
                 json_mode=True,
                 max_tokens=300,
             )
@@ -243,6 +255,7 @@ def _to_intent(actor_id: str, text: str, p: IntentParse) -> Intent:
         action=p.action,
         target=p.target,
         approach=normalize_approach(p.approach) if p.approach else None,
+        topic=p.topic,
         is_attack=p.is_attack,
         needs_check=p.needs_check,
         candidates=p.candidates,

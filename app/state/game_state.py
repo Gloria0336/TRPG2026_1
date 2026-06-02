@@ -191,6 +191,51 @@ class GameState:
             self.flags.pop("pending_freeplay_actor_id", None)
             self.bump()
 
+    # ── clarification stack (per-actor C-tier follow-up history) ──
+    # Each actor can have at most one open clarification thread at a time. We
+    # store them as a dict keyed by actor_id so two PCs can converge in parallel.
+    # Each entry: {"turns": [{"gm": str, "player": str}], "started_ts": float}.
+    # MAX_CLARIFICATION_TURNS bounds the loop — if we still haven't converged
+    # the dispatcher gives up and narrates a no-roll beat so play moves on.
+    MAX_CLARIFICATION_TURNS = 3
+
+    def _clarification_store(self) -> dict:
+        return self.flags.setdefault("clarifications", {})
+
+    def get_clarification(self, actor_id: str) -> list[dict]:
+        """The open follow-up history for this actor, oldest→newest. Empty when
+        nothing is pending."""
+        entry = self._clarification_store().get(actor_id)
+        return list(entry.get("turns", [])) if entry else []
+
+    def push_clarification(self, actor_id: str, gm_question: str, player_reply: str = "") -> int:
+        """Record one GM-question / player-reply pair on the actor's open thread.
+        Returns the new total turn count (use to enforce MAX_CLARIFICATION_TURNS)."""
+        store = self._clarification_store()
+        entry = store.setdefault(actor_id, {"turns": []})
+        entry["turns"].append({"gm": gm_question, "player": player_reply})
+        self.bump()
+        return len(entry["turns"])
+
+    def record_clarification_reply(self, actor_id: str, player_reply: str) -> None:
+        """Attach the player's next utterance to the most-recent GM question
+        (called as the new /action arrives, before re-interpreting it)."""
+        entry = self._clarification_store().get(actor_id)
+        if not entry or not entry.get("turns"):
+            return
+        entry["turns"][-1]["player"] = player_reply
+        self.bump()
+
+    def clear_clarification(self, actor_id: str) -> None:
+        store = self._clarification_store()
+        if actor_id in store:
+            store.pop(actor_id, None)
+            self.bump()
+
+    def clarification_turn_count(self, actor_id: str) -> int:
+        entry = self._clarification_store().get(actor_id)
+        return len(entry.get("turns", [])) if entry else 0
+
     # ── scene / encounter orchestration ──
     @property
     def current_location_id(self) -> str:

@@ -142,6 +142,9 @@ class Character:
     save_prof: list[str] = field(default_factory=list)  # proficient saving-throw abilities
     actions: list[Action] = field(default_factory=list)
     conditions: list[str] = field(default_factory=list)
+    # Per-condition data (level / source / duration). Parallel to `conditions`;
+    # key is the condition id (incl. parametric "loyal_to:X"). See app.engine.conditions.
+    condition_meta: dict[str, dict] = field(default_factory=dict)
     # 5e death saving throws (PCs only): successes/failures, and a "stable"/"dead" marker
     death_successes: int = 0
     death_failures: int = 0
@@ -232,6 +235,10 @@ class Intent:
     action: str | None = None          # e.g. "pick_lock", "persuade", "attack"
     target: str | None = None          # free-text target reference
     approach: str | None = None        # skill / action name driving the check
+    # The specific subject of the action when the player named one — e.g. for
+    # "詢問兜帽客內褲顏色" the topic is "內褲顏色". Surfaced to the narrator so
+    # prose stays literal instead of collapsing to a generic "they ask a question".
+    topic: str | None = None
     is_attack: bool = False            # True if the player is attempting to attack/fight
     # Tier-A only: True (default) → roll a d20 check; False → trivial/uncontested beat
     # resolved without a roll. The engine gate (resolution.requires_check) is the final
@@ -342,6 +349,10 @@ class ResolutionResult:
     cost: Cost | None = None          # attached when band is PARTIAL or FAILURE (§4.7)
     target_id: str | None = None
     target_name: str | None = None
+    # The specific subject of the action — copied through from Intent.topic so
+    # the narrator can stay literal ("asks about her underwear color") rather
+    # than collapsing to a generic verb.
+    topic: str | None = None
     dc: int | None = None
     roll_breakdown: str | None = None  # human-readable dice breakdown for the embed
     natural: int | None = None

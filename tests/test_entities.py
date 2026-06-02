@@ -81,5 +81,5 @@ def test_compose_summary_and_context_reflect_departure():
     ctx = prompts.narrate_context(gs, result)
     assert "NO LONGER PRESENT" in ctx
     # The hooded figure is present-listed nowhere; 老佩林 still is.
-    assert "IN THE SCENE NOW" in ctx
+    assert "HERE NOW" in ctx
     assert "老佩林" in ctx

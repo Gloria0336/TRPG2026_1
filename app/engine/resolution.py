@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import dice, rules_5e
+from . import conditions, dice, rules_5e
+from .conditions import CheckOutcome, GateDecision
 from .types import (
     Character,
     Cost,
@@ -62,6 +63,62 @@ CONTESTED_SKILLS: frozenset[str] = frozenset({
 })
 
 
+def _parametric_loyalty_decision(
+    conds: list[str], actor_id: str, approach: str | None,
+) -> GateDecision | None:
+    """Resolve LOYAL_TO:<ref> / INDEBTED_TO:<ref> against the current actor.
+
+    - loyal_to:<X> + persuasion/intimidation/deception → AUTO_FAIL unless ref==actor
+    - indebted_to:<actor> + persuasion → AUTO_SUCCESS
+    Returns None when no parametric flag fires; the caller falls back to the
+    standard catalog gate.
+    """
+    if approach not in {"persuasion", "intimidation", "deception"}:
+        return None
+    for cid in conds:
+        base, ref = conditions.parse_parametric(cid)
+        if base == conditions.LOYAL_TO and ref and ref != actor_id:
+            return GateDecision(
+                outcome=CheckOutcome.AUTO_FAIL,
+                triggering=(cid,),
+                note=f"{conditions.label(cid)}：對效忠對象不利的要求被拒絕",
+            )
+        if base == conditions.INDEBTED_TO and ref == actor_id and approach == "persuasion":
+            return GateDecision(
+                outcome=CheckOutcome.AUTO_SUCCESS,
+                triggering=(cid,),
+                note=f"{conditions.label(cid)}：因人情自然配合",
+            )
+    return None
+
+
+def gate_for_intent(state: "GameState", intent: Intent) -> GateDecision:
+    """Look up the target's mechanical conditions and return a pre-roll gate
+    decision (skip / auto-success / auto-fail / adv / disadv).
+
+    Returns ROLL when there is no target, no conditions, or none of them apply
+    to this approach/attack category. Called by both `requires_check` (so an
+    auto-success bypasses the contested-skill gate) and `resolve` (so the d20
+    is actually skipped when warranted).
+    """
+    if not intent.target:
+        return GateDecision(CheckOutcome.ROLL)
+    from ..db import store
+    _, conds = store.get_conditions_by_ref(state.current_location_id, intent.target)
+    if not conds:
+        return GateDecision(CheckOutcome.ROLL)
+    skill = normalize_approach(intent.approach or intent.action)
+    # Parametric loyalty / debt is decided against the actor id, so it lives outside
+    # the catalog's per-skill table.
+    parametric = _parametric_loyalty_decision(conds, intent.actor_id, skill)
+    if parametric is not None:
+        return parametric
+    meta = store.get_meta_by_ref(state.current_location_id, intent.target)
+    return conditions.evaluate_gate(
+        conds, approach=skill, is_attack=intent.is_attack, condition_meta=meta,
+    )
+
+
 def requires_check(state: "GameState", intent: Intent) -> bool:
     """Engine gate over the parser's `needs_check` proposal (design §8.3).
 
@@ -69,9 +126,16 @@ def requires_check(state: "GameState", intent: Intent) -> bool:
     the action is an attack, uses a contested skill, hits a scene-authored challenge,
     or targets a wary/afraid/hostile entity. Trivial, uncontested beats return False
     and may be narrated without a roll.
+
+    A target condition that short-circuits the roll (auto-success / auto-fail) also
+    returns False here — `resolve` will produce the outcome without a d20 so the
+    contested-skill gate cannot force a wasted roll against e.g. a hypnotized NPC.
     """
     if intent.is_attack:
         return True
+    gate = gate_for_intent(state, intent)
+    if gate.short_circuits:
+        return False
     skill = normalize_approach(intent.approach or intent.action)
     if skill in CONTESTED_SKILLS:
         return True
@@ -79,7 +143,7 @@ def requires_check(state: "GameState", intent: Intent) -> bool:
         return True
     if intent.target:
         from ..db import store
-        ent = store.find_by_ref(state.scene.id, intent.target)
+        ent = store.find_by_ref(state.current_location_id, intent.target)
         if ent and ent.get("disposition") in ("wary", "afraid", "hostile"):
             return True
     return False
@@ -127,6 +191,47 @@ _SKILL_DEFAULT_COST: dict[str, CostType] = {
 }
 
 _DEFAULT_COST: CostType = CostType.TIME
+
+
+# Action verb (lowercased, stripped) → condition that lands on the target when
+# the check SUCCEEDs. Approach is usually `arcana` (魔法系) or the verb itself,
+# so we key off `action` first then `approach` second. Kept small for the MVP;
+# new spells just add a row here.
+_EFFECT_TO_CONDITION: dict[str, str] = {
+    # 中文動詞
+    "催眠": conditions.HYPNOTIZED,
+    "魅惑": conditions.CHARMED,
+    "支配": conditions.DOMINATED,
+    "嚇": conditions.FRIGHTENED,
+    "威嚇": conditions.FRIGHTENED,   # PARTIAL/SUCCESS leaves target shaken
+    "束縛": conditions.RESTRAINED,
+    "纏繞": conditions.RESTRAINED,
+    "擒抱": conditions.GRAPPLED,
+    "推倒": conditions.PRONE,
+    "致盲": conditions.BLINDED,
+    "震懾": conditions.STUNNED,
+    "麻痺": conditions.PARALYZED,
+    # English verbs (parser sometimes returns these)
+    "hypnotize": conditions.HYPNOTIZED,
+    "hypnotise": conditions.HYPNOTIZED,
+    "charm": conditions.CHARMED,
+    "dominate": conditions.DOMINATED,
+    "frighten": conditions.FRIGHTENED,
+    "intimidate": conditions.FRIGHTENED,
+    "restrain": conditions.RESTRAINED,
+    "entangle": conditions.RESTRAINED,
+    "grapple": conditions.GRAPPLED,
+    "trip": conditions.PRONE,
+    "shove": conditions.PRONE,
+    "blind": conditions.BLINDED,
+    "stun": conditions.STUNNED,
+    "paralyze": conditions.PARALYZED,
+}
+
+# Intimidation succeeds → target is shaken, not literally frightened by 5e RAW,
+# but the MVP collapses both onto FRIGHTENED so the prompt + gate stay simple.
+# Only social verbs that *control or disable* the target produce a condition;
+# generic persuasion/insight do not (they should not silence future checks).
 
 _COST_NOTE_ZH: dict[CostType, str] = {
     CostType.TIME: "時間流逝",
@@ -249,6 +354,91 @@ def _compose_external(
     return capped, parts
 
 
+def _condition_for(action: str | None, approach: str | None) -> str | None:
+    """Look up the condition that should land on the target when this check
+    succeeds. Returns None when nothing maps."""
+    for key in (action, approach):
+        if not key:
+            continue
+        k = str(key).strip().lower()
+        if k in _EFFECT_TO_CONDITION:
+            return _EFFECT_TO_CONDITION[k]
+    return None
+
+
+def _apply_condition_effects(
+    state: "GameState", intent: Intent, result: ResolutionResult,
+) -> None:
+    """If the check produced SUCCESS/PARTIAL on an action that controls or
+    disables the target (catalog lookup), attach the matching condition to the
+    target entity. PARTIAL still applies — the goal was achieved — but FAILURE
+    does not."""
+    if result.band not in (ResultBand.SUCCESS, ResultBand.PARTIAL):
+        return
+    if not intent.target:
+        return
+    cid = _condition_for(intent.action, intent.approach)
+    if cid is None:
+        return
+    from ..db import store
+    ent = store.find_by_ref(state.current_location_id, intent.target)
+    if ent is None:
+        return
+    if store.add_condition(ent["id"], cid):
+        log.info("resolve: auto-applied condition %s to entity %s (action=%s approach=%s)",
+                 cid, ent["id"], intent.action, intent.approach)
+        result.deltas.append(f"狀態：{conditions.label(cid)}")
+
+
+def _build_short_circuit_result(
+    actor: Character,
+    intent: Intent,
+    skill: str,
+    dc: int,
+    gate: GateDecision,
+) -> ResolutionResult:
+    """Construct a ResolutionResult when a target condition skips the d20.
+
+    AUTO_SUCCESS → SUCCESS band, no cost. AUTO_FAIL → FAILURE band, no cost
+    (the gate already explains why; layering a structured cost on top would
+    double-narrate it). AUTO_CRIT is treated as SUCCESS here in the out-of-
+    combat path; combat attacks handle the crit separately.
+    """
+    if gate.outcome is CheckOutcome.AUTO_FAIL:
+        band = ResultBand.FAILURE
+        success = False
+        verdict = "FAILURE"
+        hint = "Describe a setback; the target's condition makes the action moot."
+    else:
+        band = ResultBand.SUCCESS
+        success = True
+        verdict = "SUCCESS"
+        hint = "Describe a clean success that follows from the target's condition."
+
+    label = skill.replace("_", " ").title() if skill else "Check"
+    summary = f"{label} check vs DC {dc}: {verdict} (條件短路)"
+    result = ResolutionResult(
+        kind=ResultKind.CHECK,
+        actor_id=actor.id,
+        actor_name=actor.name,
+        success=success,
+        band=band,
+        dc=dc,
+        roll_breakdown="無需擲骰（目標狀態觸發短路）",
+        summary=summary,
+        narration_hint=hint,
+    )
+    if intent.target:
+        result.target_name = intent.target
+    if intent.raw_text:
+        result.raw_text = intent.raw_text
+    if intent.topic:
+        result.topic = intent.topic
+    if gate.note:
+        result.deltas.append(f"條件觸發：{gate.note}")
+    return result
+
+
 def resolve(
     state: "GameState",
     intent: Intent,
@@ -273,9 +463,61 @@ def resolve(
     dc = determine_dc(state, intent, proposed_dc)
     advantage, disadvantage = state.scene.advantage_for(skill)
 
+    # Pre-roll condition gate (target charmed/hypnotized/dead/already_resolved …).
+    # Short-circuit outcomes bypass the d20 entirely; adv/disadv stack with the
+    # scene's own modifiers and cancel as in 5e.
+    gate = gate_for_intent(state, intent)
+    if gate.advantage:
+        advantage = True
+    if gate.disadvantage:
+        disadvantage = True
+
+    # Actor's own conditions (bless / exhaustion / poisoned / under_duress / …).
+    # We pass condition_meta lazily — Character.conditions is a flat list[str] today,
+    # so EXHAUSTED defaults to L1 unless meta is wired later via condition_meta.
+    actor_meta = getattr(actor, "condition_meta", None) or {}
+    actor_effect = conditions.evaluate_actor(
+        actor.conditions, approach=skill, is_attack=intent.is_attack,
+        condition_meta=actor_meta,
+    )
+    if actor_effect.advantage:
+        advantage = True
+    if actor_effect.disadvantage:
+        disadvantage = True
+    if advantage and disadvantage:
+        advantage = disadvantage = False
+
+    if gate.short_circuits:
+        log.info("resolve: condition gate short-circuit outcome=%s triggering=%s",
+                 gate.outcome.value, ",".join(gate.triggering))
+        result = _build_short_circuit_result(actor, intent, skill, dc, gate)
+        state.log_result(result)
+        return result
+
+    if actor_effect.short_circuits:
+        log.info("resolve: actor effect short-circuit outcome=%s triggering=%s",
+                 actor_effect.outcome.value, ",".join(actor_effect.triggering))
+        result = _build_short_circuit_result(
+            actor, intent, skill, dc,
+            GateDecision(outcome=actor_effect.outcome,
+                         triggering=actor_effect.triggering,
+                         note=actor_effect.note),
+        )
+        state.log_result(result)
+        return result
+
     external_bonus, external_parts = _compose_external(
         state, actor, skill, helpers, env_tier, tool_bonus, resource_spend
     )
+
+    # Actor's +1d4 / -1d4 (bless / guidance / bane). Roll once and fold into the
+    # external bonus so it shows up in the dice breakdown alongside assist etc.
+    if actor_effect.bonus_dice:
+        sign = +1 if actor_effect.bonus_dice > 0 else -1
+        die = dice.roll_dice(1, abs(actor_effect.bonus_dice), 0).total
+        external_bonus += sign * die
+        label_zh = "+" if sign > 0 else "−"
+        external_parts.append(f"{label_zh}1d{abs(actor_effect.bonus_dice)}({sign*die:+d}：{actor_effect.note.split('：')[0]})")
 
     log.info("resolve: actor=%s skill=%s dc=%s adv=%s disadv=%s external=%+d (%s)",
              actor.name, skill, dc, advantage, disadvantage, external_bonus,
@@ -293,9 +535,35 @@ def resolve(
     # actually addressed — otherwise it has to guess from the scene description.
     if intent.raw_text:
         result.raw_text = intent.raw_text
+    # Topic (e.g. "內褲顏色") goes through so the narrator stays literal instead
+    # of collapsing to "they ask a question".
+    if intent.topic:
+        result.topic = intent.topic
 
     if external_parts:
         result.deltas.append("外部加值：" + "、".join(external_parts))
+
+    # Actor-side band downgrade (e.g. under_duress on the actor itself — rare for
+    # PCs, but the mechanism is symmetric). SUCCESS becomes PARTIAL so the prose
+    # carries a cost the player can feel.
+    if actor_effect.band_downgrade and result.band is ResultBand.SUCCESS:
+        result.band = ResultBand.PARTIAL
+        result.summary = result.summary.replace("SUCCESS", "PARTIAL")
+        result.deltas.append(f"狀態降級：{actor_effect.note}")
+
+    # Target-side D-flag: a coerced NPC who's the *target* of social pressure shouldn't
+    # give a clean SUCCESS either — the goal IS achieved but the cost lands.
+    if intent.target and result.band is ResultBand.SUCCESS:
+        from ..db import store as _store
+        _, target_conds = _store.get_conditions_by_ref(state.current_location_id, intent.target)
+        for cid in target_conds:
+            base, _ref = conditions.parse_parametric(cid)
+            eff = conditions.CATALOG.get(base)
+            if eff and eff.band_downgrade:
+                result.band = ResultBand.PARTIAL
+                result.summary = result.summary.replace("SUCCESS", "PARTIAL")
+                result.deltas.append(f"目標狀態降級：{eff.label_zh}")
+                break
 
     # Structured cost on PARTIAL/FAILURE (§4.7). Recorded into deltas so the dashboard
     # log + future RAG/history layer can read it as plain text without re-parsing JSON.
@@ -304,6 +572,11 @@ def resolve(
         if cost is not None:
             result.cost = cost
             result.deltas.append(f"代價：{cost.note}")
+
+    # Auto-attach conditions for spells/effects that control or disable a target
+    # (e.g. 催眠術 SUCCESS → hypnotized on the target entity). Done before logging
+    # so the dashboard row shows the state change in its deltas.
+    _apply_condition_effects(state, intent, result)
 
     log.info("resolve: result band=%s success=%s roll=%s summary=%s target=%s cost=%s",
              result.band.value if result.band else None,

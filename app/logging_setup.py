@@ -1,8 +1,11 @@
-"""Centralized structured logger for tracing one app run at a time.
+"""Centralized structured logger for tracing one campaign recording at a time.
 
 Every step that touches a player action, AI interpret, HTTP call, JSON parse,
 schema validation, intent dispatch, dice roll, or narration should log through
-`get_logger(...)` so the current run's trace file tells the whole story.
+`get_logger(...)` so the active campaign recording tells the whole story.
+
+The console logger is always available while the app runs. File recording is
+started explicitly by `/start` and finished explicitly by `/finish`.
 
 Use levels deliberately:
   DEBUG   payload contents (prompts, raw responses, parsed JSON, intent fields)
@@ -13,9 +16,9 @@ Use levels deliberately:
 from __future__ import annotations
 
 import atexit
+from datetime import datetime
 import logging
 import logging.handlers
-import os
 import sys
 from pathlib import Path
 
@@ -24,76 +27,44 @@ from .config import ROOT_DIR
 LOG_DIR = ROOT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-# One stable file so you always open the same trace.log. Runs accumulate here
-# (each run is delimited by a "logger initialized" line); the rotating handler
-# caps total size so it never grows unbounded.
-TRACE_FILE = LOG_DIR / "trace.log"
+TRACE_PREFIX = "trace"
+TRACE_MAX_BYTES = 4_000_000
+TRACE_BACKUP_COUNT = 3
 
 _initialized = False
 _closed = False
 _trace_file: Path | None = None
-_console_ctrl_handler: object | None = None
+_file_handler: logging.handlers.RotatingFileHandler | None = None
+_console_level = logging.INFO
+_file_level = logging.DEBUG
+_formatter = logging.Formatter(
+    fmt="%(asctime)s.%(msecs)03d [%(levelname)-5s] %(name)-22s | %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def current_trace_file() -> Path | None:
-    """Return the trace file path after logging has been initialized."""
+    """Return the active trace file path, or None when no campaign is recording."""
     return _trace_file
 
 
-def _register_terminal_close_handler() -> None:
-    """Close the log file when a Windows console window is closed."""
-    global _console_ctrl_handler
-    if os.name != "nt" or _console_ctrl_handler is not None:
-        return
-
-    try:
-        import ctypes
-
-        ctrl_close_event = 2
-        ctrl_logoff_event = 5
-        ctrl_shutdown_event = 6
-        handled_events = {ctrl_close_event, ctrl_logoff_event, ctrl_shutdown_event}
-        handler_routine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
-
-        def handler(ctrl_type: int) -> bool:
-            if ctrl_type in handled_events:
-                close_logging()
-            return False
-
-        _console_ctrl_handler = handler_routine(handler)
-        ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_ctrl_handler, True)
-    except Exception:
-        return
-
-
 def setup_logging(console_level: int = logging.INFO, file_level: int = logging.DEBUG) -> None:
-    """Initialize the `trpg` logger tree. Idempotent and safe from multiple entrypoints."""
-    global _initialized, _closed, _trace_file
+    """Initialize the `trpg` console logger. Idempotent and safe from multiple entrypoints."""
+    global _initialized, _closed, _console_level, _file_level
+    _console_level = console_level
+    _file_level = file_level
     if _initialized:
         return
 
     _closed = False
-    _trace_file = TRACE_FILE
-
-    fmt = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d [%(levelname)-5s] %(name)-22s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    file_handler = logging.handlers.RotatingFileHandler(
-        _trace_file, maxBytes=4_000_000, backupCount=5, encoding="utf-8"
-    )
-    file_handler.setLevel(file_level)
-    file_handler.setFormatter(fmt)
 
     console_handler = logging.StreamHandler(stream=sys.stdout)
     console_handler.setLevel(console_level)
-    console_handler.setFormatter(fmt)
+    console_handler.setFormatter(_formatter)
 
     root = logging.getLogger("trpg")
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
-    root.addHandler(file_handler)
     root.addHandler(console_handler)
     root.propagate = False
 
@@ -102,35 +73,90 @@ def setup_logging(console_level: int = logging.INFO, file_level: int = logging.D
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     _initialized = True
-    root.info("logger initialized - trace file: %s", _trace_file)
+    root.info("logger initialized - file recording waits for /start")
     atexit.register(close_logging)
-    _register_terminal_close_handler()
+
+
+def _trace_filename(channel_id: int | None = None) -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    channel = f"_ch{channel_id}" if channel_id else ""
+    return f"{TRACE_PREFIX}_{stamp}{channel}.log"
+
+
+def start_recording(channel_id: int | None = None, actor: str | None = None) -> Path:
+    """Open a fresh campaign trace file and begin writing logs to it."""
+    global _file_handler, _trace_file
+    if not _initialized:
+        setup_logging()
+    if _file_handler is not None:
+        finish_recording("replaced by a new /start")
+
+    LOG_DIR.mkdir(exist_ok=True)
+    _trace_file = LOG_DIR / _trace_filename(channel_id)
+    handler = logging.handlers.RotatingFileHandler(
+        _trace_file,
+        maxBytes=TRACE_MAX_BYTES,
+        backupCount=TRACE_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setLevel(_file_level)
+    handler.setFormatter(_formatter)
+    _file_handler = handler
+
+    root = logging.getLogger("trpg")
+    root.addHandler(handler)
+    root.info("recording started by /start actor=%s channel=%s trace_file=%s", actor, channel_id, _trace_file)
+    return _trace_file
+
+
+def finish_recording(reason: str = "/finish") -> Path | None:
+    """Finish the active campaign recording and close its file handler."""
+    global _file_handler, _trace_file
+    if _file_handler is None:
+        return None
+
+    root = logging.getLogger("trpg")
+    finalized = _trace_file
+    root.info("recording finished - reason=%s trace_file=%s", reason, finalized)
+
+    handler = _file_handler
+    try:
+        handler.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        handler.close()
+    except (OSError, ValueError):
+        pass
+    root.removeHandler(handler)
+    _file_handler = None
+    _trace_file = None
+    return finalized
 
 
 def close_logging() -> None:
-    """Finalize the current run's log file and close all handlers."""
-    global _initialized, _closed
+    """Close logger resources during app shutdown."""
+    global _initialized, _closed, _file_handler, _trace_file
     if not _initialized or _closed:
         return
 
     root = logging.getLogger("trpg")
-    handlers = list(root.handlers)
-    record = root.makeRecord(
-        root.name,
-        logging.INFO,
-        __file__,
-        0,
-        "logger closing - finalized trace file: %s",
-        (_trace_file,),
-        None,
-    )
+    if _file_handler is not None:
+        handler = _file_handler
+        root.removeHandler(handler)
+        try:
+            handler.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            handler.close()
+        except (OSError, ValueError):
+            pass
+        _file_handler = None
+        _trace_file = None
 
+    handlers = list(root.handlers)
     for handler in handlers:
-        if isinstance(handler, logging.FileHandler):
-            try:
-                handler.handle(record)
-            except (OSError, ValueError):
-                pass
         try:
             handler.flush()
         except (OSError, ValueError):
@@ -143,6 +169,8 @@ def close_logging() -> None:
 
     _closed = True
     _initialized = False
+    _file_handler = None
+    _trace_file = None
 
 
 def get_logger(name: str) -> logging.Logger:
