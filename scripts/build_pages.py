@@ -13,7 +13,9 @@ DIST_DIR = ROOT_DIR / "dist"
 def main() -> None:
     if DIST_DIR.exists():
         shutil.rmtree(DIST_DIR)
-    shutil.copytree(STATIC_DIR, DIST_DIR)
+    DIST_DIR.mkdir(parents=True)
+    shutil.copy2(STATIC_DIR / "index.html", DIST_DIR / "index.html")
+    shutil.copytree(STATIC_DIR, DIST_DIR / "static", ignore=shutil.ignore_patterns("index.html"))
     (DIST_DIR / ".nojekyll").write_text("", encoding="utf-8")
 
 
