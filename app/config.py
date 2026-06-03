@@ -78,6 +78,26 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator(
+        "discord_token",
+        "discord_oauth_client_id",
+        "discord_oauth_client_secret",
+        "discord_oauth_redirect_uri",
+        "portal_public_url",
+        "portal_session_secret",
+        mode="before",
+    )
+    @classmethod
+    def strip_secret_text(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+            cleaned = cleaned[1:-1].strip()
+        if cleaned.lower().startswith("bot "):
+            cleaned = cleaned[4:].strip()
+        return cleaned
+
     @property
     def session_path(self) -> Path:
         return SAVE_DIR / "session.json"

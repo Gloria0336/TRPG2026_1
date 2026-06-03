@@ -51,7 +51,10 @@ def test_portal_me_public_state(client):
     assert {c["id"] for c in snap["characters"]} >= {"pc_bram", "pc_lyra"}
 
 
-def test_portal_discord_login_requires_oauth_config(client):
+def test_portal_discord_login_requires_oauth_config(client, monkeypatch):
+    from app.web import portal_api
+
+    monkeypatch.setattr(portal_api, "_oauth_ready", lambda: False)
     r = client.get("/api/portal/auth/discord/login")
     assert r.status_code == 503
     assert r.json()["error"] == "Discord OAuth is not configured"
