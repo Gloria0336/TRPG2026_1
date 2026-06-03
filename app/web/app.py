@@ -15,6 +15,8 @@ from ..ai import orchestrator
 from ..config import STATIC_DIR, settings
 from ..db import store
 from ..state import game_state
+from .portal_api import router as portal_router
+from .session import PortalSessionMiddleware
 
 
 @asynccontextmanager
@@ -30,9 +32,19 @@ if settings.parsed_web_cors_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.parsed_web_cors_origins,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
+
+app.add_middleware(
+    PortalSessionMiddleware,
+    secret_key=settings.portal_session_secret or "dev-only-change-me",
+    same_site=settings.portal_cookie_samesite,
+    https_only=settings.portal_cookie_secure,
+)
+
+app.include_router(portal_router)
 
 
 async def _snapshot() -> dict:

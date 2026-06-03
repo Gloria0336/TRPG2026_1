@@ -723,11 +723,23 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
     notes = ent["notes"]
     if note:
         notes = (notes + "\n" + note).strip() if notes else note
+    # Location writes are validated against the global registry: the extractor may move an
+    # entity to a KNOWN place but cannot strand it at a hallucinated location_id. It can
+    # never move the party — party_location_id is engine-only (see GameState invariant).
+    new_location_id = ent["location_id"]
+    requested_loc = delta.get("location_id")
+    if requested_loc:
+        loc = get_entity_by_id(requested_loc) or find_location(requested_loc)
+        if loc is not None and loc.get("kind") == "location":
+            new_location_id = loc["id"]
+        else:
+            log.info("apply_delta: dropped unknown location_id=%r for entity %s",
+                     requested_loc, ent["id"])
     upsert_entity(
         id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
         aliases=ent.get("aliases", []),
         status=status if status in ENTITY_STATUSES else ent["status"],
-        location_id=delta.get("location_id", ent["location_id"]),
+        location_id=new_location_id,
         disposition=disposition if disposition in DISPOSITIONS else ent["disposition"],
         flags=ent.get("flags", {}), notes=notes,
         first_seen_event_id=ent.get("first_seen_event_id"),

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TRPG 玩家入口</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>TRPG 玩家入口</h1>
+      <p id="campaign-line">讀取冒險狀態中...</p>
+    </div>
+    <div class="session-actions">
+      <span id="api-status" class="pill offline">API 未連線</span>
+      <button id="login-btn" type="button">Discord 登入</button>
+      <button id="logout-btn" type="button" class="secondary hidden">登出</button>
+    </div>
+  </header>
+
+  <main class="portal-shell">
+    <section class="identity-band">
+      <div class="identity-main">
+        <span id="avatar" class="avatar">?</span>
+        <div>
+          <h2 id="player-name">訪客</h2>
+          <p id="player-status">登入後可認領角色、查看個人狀態，或建立新角色。</p>
+        </div>
+      </div>
+      <div id="turn-card" class="turn-card">目前沒有行動提示</div>
+    </section>
+
+    <nav class="tabs" aria-label="玩家入口分頁">
+      <button class="tab active" type="button" data-tab="quests">任務</button>
+      <button class="tab" type="button" data-tab="characters">角色</button>
+      <button class="tab" type="button" data-tab="create">建立角色</button>
+    </nav>
+
+    <section id="quests-panel" class="tab-panel">
+      <div class="section-head">
+        <h2>任務面板</h2>
+        <span id="quest-count" class="muted"></span>
+      </div>
+      <div id="quests" class="quest-list"></div>
+    </section>
+
+    <section id="characters-panel" class="tab-panel hidden">
+      <div class="section-head">
+        <h2>玩家角色</h2>
+        <span class="muted">可認領尚未被選擇的角色</span>
+      </div>
+      <div id="characters" class="character-grid"></div>
+    </section>
+
+    <section id="create-panel" class="tab-panel hidden">
+      <div class="section-head">
+        <h2>角色創建</h2>
+        <span class="muted">建立後會自動綁定你的 Discord 身分</span>
+      </div>
+      <form id="character-form" class="creator">
+        <label>
+          角色名稱
+          <input name="name" type="text" maxlength="48" autocomplete="off" required />
+        </label>
+        <label>
+          定位
+          <select name="archetype">
+            <option value="guardian">守護者</option>
+            <option value="mystic">秘術師</option>
+            <option value="scout">斥候</option>
+            <option value="adventurer">冒險者</option>
+          </select>
+        </label>
+        <label>
+          標記
+          <input name="portrait" type="text" maxlength="4" value="星" />
+        </label>
+        <label class="wide">
+          角色短述
+          <textarea name="blurb" maxlength="160" rows="4" placeholder="一句話描述角色的氣質、背景或戰鬥風格"></textarea>
+        </label>
+        <button type="submit">建立角色</button>
+      </form>
+      <p id="form-message" class="form-message"></p>
+    </section>
+  </main>
+
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+window.TRPG_PORTAL_API_BASE = window.TRPG_PORTAL_API_BASE || "";

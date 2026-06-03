@@ -270,6 +270,11 @@ class GameState:
         return len(entry.get("turns", [])) if entry else 0
 
     # ── scene / encounter orchestration ──
+    # INVARIANT: party_location_id is engine-only state. It is written ONLY by
+    # goto_scene / goto_location below. Narration and the entity extractor may READ it
+    # and may move an individual NPC (entity.location_id, validated in store.apply_delta),
+    # but must NEVER move the party — that is what keeps the fiction and the structured
+    # state from diverging (the "teleport back" bug).
     @property
     def current_location_id(self) -> str:
         """Canonical scope key for entities / scene summary. Equals scene.id, but named

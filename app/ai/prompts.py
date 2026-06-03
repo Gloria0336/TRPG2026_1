@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from ..config import settings
 from ..db import store
+from ..discord_bot import i18n
 from ..engine import conditions as cond
 from ..logging_setup import truncate
 from .schemas import (
@@ -372,12 +373,16 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     parts += [
         f"RECENT EVENTS:\n{history}",
         "STRUCTURED RESULT (do not alter any of this):",
-        f"  actor: {result.actor_name}",
+        # Localize the actor to the canonical Chinese name. Fed the English name, the
+        # narrator invents its own (inconsistent) transliteration each turn (布蘭姆 vs
+        # canonical 布拉姆), which then leaks into extraction and defeats PC de-dup. A
+        # stable name keeps narration, extraction, and the PC guard aligned.
+        f"  actor: {i18n.name(result.actor_name)}",
     ]
     # Critical: without target the model can't tell who the action is aimed at and
     # picks a random NPC from the scene description.
     if result.target_name:
-        parts.append(f"  target: {result.target_name}")
+        parts.append(f"  target: {i18n.name(result.target_name)}")
     # The player's original utterance is the strongest signal of intent — pass it
     # verbatim so the narrator stays on the right beat (商人 vs 兜帽客 etc.).
     if result.raw_text:
@@ -531,7 +536,11 @@ def extract_context(state: "GameState", prose: str) -> str:
         )
     else:
         lines = "（尚無已知實體）"
+    pcs = "、".join(i18n.name(c.name) for c in state.pcs()) or "（無）"
     return (
+        f"PLAYER CHARACTERS — these are the players' own characters. NEVER emit a delta "
+        f"for them and NEVER register them as an entity (no register_kind/register_name "
+        f"for these names): {pcs}\n\n"
         f"KNOWN ENTITIES:\n{lines}\n\n"
         f"GM NARRATION:\n{prose}\n\n"
         "Extract entity-state changes as JSON:"

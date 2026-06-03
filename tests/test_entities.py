@@ -62,6 +62,23 @@ def test_invalid_status_is_ignored():
     assert "緊張的兜帽客" in {e["name"] for e in store.get_present("tavern")}
 
 
+def test_apply_delta_validates_location_id(caplog):
+    """Step 1: location writes go through the global registry. A known location id is
+    accepted; a hallucinated one is dropped (the rest of the delta still applies) so an
+    entity can't be stranded at a place that does not exist."""
+    store.seed_entities("tavern", TAVERN_DEFS)
+    store.register_location("東路", location_id="east_road")
+
+    store.apply_delta("tavern", {"entity_ref": "兜帽客", "location_id": "east_road"})
+    assert store.find_by_ref("tavern", "兜帽客")["location_id"] == "east_road"
+
+    store.apply_delta("tavern", {"entity_ref": "兜帽客",
+                                 "location_id": "no_such_place", "note": "溜走了"})
+    ent = store.find_by_ref("tavern", "兜帽客")
+    assert ent["location_id"] == "east_road"   # unknown id dropped, not written
+    assert "溜走了" in ent["notes"]            # rest of the delta still applied
+
+
 def test_compose_summary_and_context_reflect_departure():
     gs = game_state.reset_state(channel_id=0)
     assert gs.scene.id == "tavern"

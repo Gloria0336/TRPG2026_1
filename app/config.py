@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Discord
     discord_token: str = ""
     discord_guild_id: str = ""
+    discord_oauth_client_id: str = ""
+    discord_oauth_client_secret: str = ""
+    discord_oauth_redirect_uri: str = ""
 
     # OpenRouter / LLM
     openrouter_api_key: str = ""
@@ -54,6 +57,10 @@ class Settings(BaseSettings):
     web_host: str = "127.0.0.1"
     web_port: int = 8000
     web_cors_origins: str = ""
+    portal_public_url: str = "http://localhost:8000"
+    portal_session_secret: str = ""
+    portal_cookie_secure: bool = False
+    portal_cookie_samesite: str = "lax"
 
     # Engine
     dice_seed: int | None = None

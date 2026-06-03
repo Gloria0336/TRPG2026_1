@@ -205,6 +205,23 @@ def test_looks_like_travel_ignores_non_travel_verb():
     assert _looks_like_travel(gs, intent) is False
 
 
+def test_looks_like_travel_recognises_emergent_unregistered_place():
+    """The trace.log teleport bug: on 東路 the player said '走回去' → action=走
+    target=鎮上. '鎮上' is not yet a registered location and is not a present
+    person/object, so the old gate returned False and the intent fell through to a
+    no-roll narrative beat — the prose moved the party 'back to town' while the
+    engine stayed on 東路, teleporting them back on the next check. A travel verb
+    aimed at an emergent place must read as travel so _begin_travel can register it."""
+    from app.discord_bot.bot import _looks_like_travel
+    from app.engine.types import Intent, IntentTier
+
+    gs = game_state.reset_state(channel_id=0)
+    gs.goto_location("east_road", title="東路")
+    intent = Intent(actor_id="pc_bram", raw_text="走回去", tier=IntentTier.A,
+                    action="走", target="鎮上")
+    assert _looks_like_travel(gs, intent) is True
+
+
 # ── Step 5: leave-current redirects to an outside, never loops ──
 
 def test_resolve_travel_target_leaves_current_to_another_known_location():

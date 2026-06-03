@@ -74,7 +74,16 @@ def _looks_like_travel(gs, intent) -> bool:
         t = intent.target.strip().lower()
         if any(n and (t in n.lower() or n.lower() in t) for n in names):
             return True
-    return False
+    # Travel verb + a target that is NOT a present in-scene person/object/creature →
+    # treat as travel to an emergent place; _begin_travel auto-registers it via
+    # resolve_or_register_location. Without this, "走回鎮上" (鎮上 not yet a registered
+    # location) fell through to a no-roll narrative beat that moved the fiction ("you
+    # arrive in town") without moving party_location_id — stranding the engine at the
+    # old location (the "teleport back" bug).
+    ent = store.find_by_ref(gs.current_location_id, intent.target)
+    if ent is not None and ent.get("kind") != "location":
+        return False
+    return True
 
 intents = discord.Intents.default()
 intents.message_content = False
@@ -213,6 +222,30 @@ async def _handle_quest_seed(gs: game_state.GameState, result, quest_seed) -> No
     asyncio.create_task(run_agent(quest["id"], quest["seed"]), name=f"quest-agent-{quest['id']}")
 
 
+def _is_pc_ref(gs: game_state.GameState, ref: str | None) -> bool:
+    """True when a free-text entity reference resolves to a player character. PCs live on
+    Character (+ their conditions), never in the narrative-entity registry, so the
+    extractor must never register or mutate them as NPCs (trace bug: a PC's name was
+    mention-tallied toward becoming an NPC entity).
+
+    Matches both the English Character.name ("Bram Ironwood") and its canonical localized
+    form (i18n "布拉姆·鐵木") — the extractor reads the Chinese narration, so the ref is
+    usually the localized name. Narrative NPCs like 老佩林 are DB entities, not Characters,
+    so they are never in gs.pcs() — no false skips."""
+    if not ref or not ref.strip():
+        return False
+    t = ref.strip().lower()
+    for pc in gs.pcs():
+        candidates = [pc.name, i18n.name(pc.name)]
+        if pc.name:
+            candidates.append(pc.name.split()[0])  # English first name ("Bram")
+        for n in candidates:
+            nl = (n or "").strip().lower()
+            if nl and (t == nl or t in nl or nl in t):
+                return True
+    return False
+
+
 async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) -> None:
     """After each narration: pull entity-state deltas (LLM extraction, offline-safe)
     and apply them, then recompute the dynamic scene summary so the next turn reads
@@ -224,6 +257,12 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
         for delta in extraction.actionable():
             d = delta.model_dump()
             ref = d.get("entity_ref") or d.get("register_name")
+            # PCs are never narrative entities — drop any delta about them before it can
+            # mention-tally into (or mutate) an NPC record. Authoritative guard: holds
+            # even offline / when the model ignores the prompt instruction.
+            if _is_pc_ref(gs, ref):
+                log.info("entity delta skipped (PC ref, never an NPC entity): scope=%s ref=%s", scope, ref)
+                continue
             existing = store.find_by_ref(scope, ref) if ref else None
             # A brand-new entity the AI just invented in prose → debounce: only promote
             # after it has been named `threshold` times (design: prevent drift-by-bloat
@@ -1054,24 +1093,6 @@ async def roll(interaction: discord.Interaction, notation: str = "1d20"):
         await interaction.response.send_message(f"🎲 `{i18n.text(r.breakdown())}`")
 
 
-@bot.tree.command(description="前往下一個場景（跳過目前段落）。")
-async def next(interaction: discord.Interaction):
-    gs = _state_for_channel(interaction.channel_id)
-    if gs is None:
-        await interaction.response.send_message("這裡目前沒有進行中的遊戲。請使用 `/start`。", ephemeral=True)
-        return
-    if gs.combat and gs.combat.active:
-        await interaction.response.send_message("請先結束目前的戰鬥！", ephemeral=True)
-        return
-    nxt = scenario.next_scene(gs.scene.id)
-    if nxt is None:
-        await interaction.response.send_message("這已經是最後一個場景了。", ephemeral=True)
-        return
-    await interaction.response.send_message(f"➡️ 前往 **{nxt['title']}**。")
-    gs.goto_scene(nxt)
-    await _open_current_scene(interaction.channel, gs)
-
-
 @bot.tree.command(description="開始目前場景的戰鬥（如果有）。")
 async def fight(interaction: discord.Interaction):
     gs = _state_for_channel(interaction.channel_id)
@@ -1119,7 +1140,7 @@ async def help(interaction: discord.Interaction):
     e = discord.Embed(title="玩法說明", description=scenario.HOW_TO_PLAY, color=discord.Color.blurple())
     e.add_field(
         name="指令",
-        value="/start ・ /join ・ /action ・ /character ・ /scene ・ /roll ・ /next ・ /fight ・ /finish ・ /restart",
+        value="/start ・ /join ・ /action ・ /character ・ /scene ・ /roll ・ /fight ・ /finish ・ /restart",
         inline=False,
     )
     await interaction.response.send_message(embed=e, ephemeral=True)
