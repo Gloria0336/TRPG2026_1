@@ -509,6 +509,27 @@ async def extract_entity_states(state: GameState, prose: str, result: Resolution
     return EntityExtraction()
 
 
+async def recap_scene(state: GameState) -> str:
+    """Fresh GM description of the CURRENT situation from live state (for /scene), not the
+    static authored summary. Offline / on any error → the live composed summary text, so
+    /scene still reflects who is actually present and what has changed."""
+    log.info("recap_scene() location=%s", state.current_location_id)
+    if _ai_enabled():
+        try:
+            prose = await _chat(
+                settings.model_narrate, prompts.SCENE_RECAP_SYSTEM,
+                prompts.scene_recap_context(state), max_tokens=240,
+            )
+            log.info("recap_scene: AI OK (%d chars)", len(prose))
+            return prose
+        except httpx.HTTPError as exc:
+            log.warning("recap_scene: HTTP failure (%s: %s) — using live summary",
+                        type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001
+            log.error("recap_scene: fallback (%s: %s)", type(exc).__name__, exc, exc_info=True)
+    return prompts.compose_scene_summary(state)
+
+
 async def open_scene(state: GameState) -> str:
     log.info("open_scene() scene=%s title=%s", state.scene.id, state.scene.title)
     if _ai_enabled():
@@ -528,5 +549,7 @@ async def open_scene(state: GameState) -> str:
             log.error("open_scene: fallback via %s: %s: %s",
                       settings.model_narrate, type(exc).__name__, exc, exc_info=True)
     else:
-        log.info("open_scene: AI disabled, using scene summary")
-    return state.scene.summary
+        log.info("open_scene: AI disabled, using live composed summary")
+    # Offline / on error → the LIVE composed summary (authored seed + present entities),
+    # never the raw static blurb, so the opening still reflects real state.
+    return prompts.compose_scene_summary(state)

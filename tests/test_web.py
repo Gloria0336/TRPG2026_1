@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.state import game_state
 from app.web.app import app
+from app.web.portal_app import app as portal_app
 
 
 @pytest.fixture
@@ -94,3 +95,22 @@ def test_portal_create_character(client, monkeypatch):
     created = snap["player_status"]["character"]
     assert created["name"] == "Sable Vey"
     assert created["id"] in {c["id"] for c in snap["characters"]}
+
+
+def test_public_portal_serves_player_entry_only():
+    game_state.set_state(None)
+    with TestClient(portal_app) as c:
+        r = c.get("/")
+        assert r.status_code == 200
+        assert "TRPG 玩家入口" in r.text
+        assert 'src="./app.js"' in r.text
+
+        game_state.reset_state(channel_id=42)
+        portal_state = c.get("/api/portal/me")
+        assert portal_state.status_code == 200
+        assert portal_state.json()["campaign"]["started"] is True
+
+        assert c.get("/api/state").status_code == 404
+        assert c.get("/api/ai/health").status_code == 404
+        assert c.get("/api/stream").status_code == 404
+    game_state.set_state(None)

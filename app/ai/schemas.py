@@ -125,9 +125,13 @@ class EntityStateDelta(BaseModel):
 
 
 class EntityExtraction(BaseModel):
-    """The extractor's full reply: a list of state deltas (may be empty)."""
+    """The extractor's full reply: a list of state deltas (may be empty), plus an
+    optional lasting change to the PLACE itself (not tied to any one entity)."""
 
     deltas: list[EntityStateDelta] = Field(default_factory=list)
+    # A persistent environmental change to the current location — e.g. "絆線已被拆除",
+    # "地上的水囊潑灑了一地". Folded into the location's state and shown on revisits.
+    location_note: str | None = None
 
     @field_validator("deltas", mode="before")
     @classmethod
@@ -222,7 +226,8 @@ EXTRACT_JSON_SHAPE = (
     '      "register_name": name of the new entity | null,\n'
     '      "aliases": [other names for the new entity]\n'
     '    }\n'
-    '  ]\n'
+    '  ],\n'
+    '  "location_note": one lasting change to the PLACE itself, not tied to a person/object (e.g. "絆線已被拆除") | null\n'
     '}'
 )
 

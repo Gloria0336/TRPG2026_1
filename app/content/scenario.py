@@ -27,13 +27,23 @@ HOW_TO_PLAY = (
 # travel resolves to canonical places — and traveling to one that is also a scripted
 # scene re-enters that scene with its full content (challenges/encounter/entities).
 # Emergent places the players invent are auto-registered by store.resolve_or_register_location.
+# `connects`/`parent` give travel a shape (design §6: location is first-class). The party
+# can only reach adjacent places from here; `parent` is the larger area a place sits inside
+# (so "leave the tavern" goes out to the village, not to a random far location). Emergent
+# places carry no adjacency and stay freely reachable (see prompts.known_exits fallback).
 LOCATIONS: list[dict] = [
+    {"id": "morningbridge", "name": "晨橋村", "aliases": ["鎮上", "村子", "村莊", "晨橋"],
+     "notes": "寧靜的邊境村莊；鎏金酒杯酒館與往東的大路都在這裡。",
+     "connects": ["tavern", "east_road"]},
     {"id": "tavern", "name": "鎏金酒杯酒館", "aliases": ["酒館", "鎏金酒杯", "鎏金酒杯酒館"],
-     "notes": "晨橋村熱鬧的酒館，冒險的起點。"},
+     "notes": "晨橋村熱鬧的酒館，冒險的起點。",
+     "parent": "morningbridge", "connects": ["morningbridge", "east_road"]},
     {"id": "east_road", "name": "東路", "aliases": ["東邊道路", "大路", "東面道路"],
-     "notes": "晨橋村往東的道路，商隊失蹤之處。"},
+     "notes": "晨橋村往東的道路，商隊失蹤之處。",
+     "parent": "morningbridge", "connects": ["morningbridge", "tavern", "warren"]},
     {"id": "warren", "name": "哥布林巢穴", "aliases": ["巢穴", "哥布林窩", "山坡裂隙"],
-     "notes": "山坡裂隙後、煙霧瀰漫的哥布林巢穴。"},
+     "notes": "山坡裂隙後、煙霧瀰漫的哥布林巢穴。",
+     "connects": ["east_road"]},
 ]
 
 # Per-scene cost pools (design §4.7). When a check lands in PARTIAL or FAILURE the
@@ -65,6 +75,7 @@ SCENES: list[dict] = [
                 "aliases": ["兜帽客", "兜帽人", "神秘人", "兜帽客人"],
                 "status": "present", "disposition": "afraid",
                 "notes": "坐在角落，不時偷瞄佩林。",
+                "flags": {"agenda": "暗中監視佩林，怕商隊真相被查出；情勢不對就設法溜走"},
             },
         ],
         "challenges": {

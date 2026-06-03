@@ -117,13 +117,14 @@ def test_intent_prompt_lists_known_exits():
     actor = gs.pcs()[0]
     ctx = prompts.intent_context(gs, actor, "出發")
     assert "EXITS" in ctx
-    assert "東路" in ctx          # authored neighbour
-    assert "哥布林巢穴" in ctx     # another authored neighbour
-    # The current location must NOT appear in EXITS — only places you can travel TO.
     exit_section = ctx.split("EXITS")[1]
-    # Tavern alias still appears in LOCATION line above; only check the EXITS region
-    # which ends at "Known location checks".
     exit_block = exit_section.split("Known location checks")[0]
+    # 2d adjacency: from the tavern you can reach its neighbours (東路, 晨橋村) but NOT the
+    # goblin warren directly — it is two hops away, past the east road.
+    assert "東路" in exit_block        # adjacent neighbour
+    assert "晨橋村" in exit_block       # the containing village (parent)
+    assert "哥布林巢穴" not in exit_block  # no longer everywhere-reachable
+    # The current location must NOT appear in EXITS — only places you can travel TO.
     assert "鎏金酒杯酒館" not in exit_block
 
 
@@ -145,6 +146,36 @@ def test_known_exits_excludes_current_location():
     ids = [e["id"] for e in exits]
     assert "tavern" not in ids
     assert "east_road" in ids
+
+
+def test_known_exits_follow_authored_adjacency():
+    """2d: from the tavern only adjacent places + the parent village are reachable; the
+    warren (two hops away) is not. From the east road the warren IS reachable."""
+    gs = game_state.reset_state(channel_id=0)
+    tavern_exits = {e["id"] for e in prompts.known_exits(gs)}
+    assert tavern_exits == {"morningbridge", "east_road"}
+
+    gs.goto_location("east_road", title="東路")
+    road_exits = {e["id"] for e in prompts.known_exits(gs)}
+    assert "warren" in road_exits and "morningbridge" in road_exits
+
+
+def test_known_exits_fall_back_for_emergent_location():
+    """An emergent place carries no adjacency → don't strand the player; offer everywhere."""
+    gs = game_state.reset_state(channel_id=0)
+    loc = store.resolve_or_register_location("南方廢礦")
+    gs.goto_location(loc["id"], title=loc["name"])
+    ids = {e["id"] for e in prompts.known_exits(gs)}
+    assert {"tavern", "east_road", "warren", "morningbridge"} <= ids
+
+
+def test_leave_current_steps_out_to_parent_village():
+    """2d: leaving the tavern goes out to its containing area (晨橋村), not a random far place."""
+    from app.discord_bot.bot import _resolve_travel_target
+
+    gs = game_state.reset_state(channel_id=0)
+    loc = _resolve_travel_target(gs, "酒館")
+    assert loc is not None and loc["id"] == "morningbridge"
 
 
 # ── Step 4: dispatch detects travel from any movement verb ──
@@ -217,8 +248,10 @@ def test_looks_like_travel_recognises_emergent_unregistered_place():
 
     gs = game_state.reset_state(channel_id=0)
     gs.goto_location("east_road", title="東路")
-    intent = Intent(actor_id="pc_bram", raw_text="走回去", tier=IntentTier.A,
-                    action="走", target="鎮上")
+    # An unregistered place that is not a present person/object must still read as travel
+    # ('鎮上' is now an authored alias of 晨橋村, so use a genuinely emergent target here).
+    intent = Intent(actor_id="pc_bram", raw_text="往南方的廢礦走去", tier=IntentTier.A,
+                    action="走", target="南方廢礦")
     assert _looks_like_travel(gs, intent) is True
 
 

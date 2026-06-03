@@ -62,21 +62,39 @@ def test_invalid_status_is_ignored():
     assert "緊張的兜帽客" in {e["name"] for e in store.get_present("tavern")}
 
 
-def test_apply_delta_validates_location_id(caplog):
-    """Step 1: location writes go through the global registry. A known location id is
-    accepted; a hallucinated one is dropped (the rest of the delta still applies) so an
-    entity can't be stranded at a place that does not exist."""
+def test_apply_delta_relocates_to_known_location(caplog):
+    """Step 1 + 2e: location writes go through the global registry. A known location id
+    RELOCATES the entity (presence follows it); a hallucinated one is dropped and the rest
+    of the delta still applies, so an entity can't be stranded at a place that doesn't
+    exist."""
     store.seed_entities("tavern", TAVERN_DEFS)
     store.register_location("東路", location_id="east_road")
 
+    # Valid destination → the NPC actually moves there.
     store.apply_delta("tavern", {"entity_ref": "兜帽客", "location_id": "east_road"})
-    assert store.find_by_ref("tavern", "兜帽客")["location_id"] == "east_road"
+    assert store.find_by_ref("tavern", "兜帽客") is None          # gone from origin scope
+    moved = store.find_by_ref("east_road", "兜帽客")
+    assert moved is not None and moved["location_id"] == "east_road"
 
-    store.apply_delta("tavern", {"entity_ref": "兜帽客",
-                                 "location_id": "no_such_place", "note": "溜走了"})
+    # Unknown destination → dropped; the entity stays put and the note still applies.
+    store.apply_delta("east_road", {"entity_ref": "兜帽客",
+                                     "location_id": "no_such_place", "note": "溜走了"})
+    ent = store.find_by_ref("east_road", "兜帽客")
+    assert ent is not None and ent["location_id"] == "east_road"  # not moved
+    assert "溜走了" in ent["notes"]                                # rest still applied
+
+
+def test_move_entity_relocates_and_rejects_nonlocation():
+    """2e: an NPC can roam between registered locations; presence follows the move."""
+    store.seed_entities("tavern", TAVERN_DEFS)
+    store.register_location("東路", location_id="east_road")
     ent = store.find_by_ref("tavern", "兜帽客")
-    assert ent["location_id"] == "east_road"   # unknown id dropped, not written
-    assert "溜走了" in ent["notes"]            # rest of the delta still applied
+
+    assert store.move_entity(ent["id"], "east_road") is True
+    assert store.find_by_ref("tavern", "兜帽客") is None          # left the tavern
+    assert store.find_by_ref("east_road", "兜帽客") is not None    # arrived on the road
+    # A non-location destination is rejected (can't "move into" a person).
+    assert store.move_entity(ent["id"], "ent_perrin") is False
 
 
 def test_compose_summary_and_context_reflect_departure():

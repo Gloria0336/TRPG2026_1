@@ -23,18 +23,27 @@ from .db import store
 from .discord_bot.bot import bot
 from .state import game_state
 from .web.app import app as web_app
+from .web.portal_app import app as portal_app
 
 
-async def _serve_web() -> None:
+async def _serve_app(app, *, host: str, port: int) -> None:
     config = uvicorn.Config(
-        web_app,
-        host=settings.web_host,
-        port=settings.web_port,
+        app,
+        host=host,
+        port=port,
         log_level="info",
         loop="asyncio",
     )
     server = uvicorn.Server(config)
     await server.serve()
+
+
+async def _serve_web() -> None:
+    await _serve_app(web_app, host=settings.web_host, port=settings.web_port)
+
+
+async def _serve_portal() -> None:
+    await _serve_app(portal_app, host=settings.portal_host, port=settings.portal_port)
 
 
 async def main() -> None:
@@ -58,7 +67,10 @@ async def main() -> None:
         if saved:
             game_state.set_state(saved)
 
-    tasks = [asyncio.create_task(_serve_web(), name="web")]
+    tasks = [
+        asyncio.create_task(_serve_web(), name="web"),
+        asyncio.create_task(_serve_portal(), name="portal"),
+    ]
 
     log.info("startup: ai_offline=%s has_key=%s model_intent=%s model_narrate=%s",
              settings.ai_offline, bool(settings.openrouter_api_key),
@@ -67,9 +79,13 @@ async def main() -> None:
     if settings.discord_token:
         tasks.append(asyncio.create_task(bot.start(settings.discord_token), name="discord"))
         log.info("Discord bot + dashboard at http://%s:%s", settings.web_host, settings.web_port)
+        log.info("Player portal at http://%s:%s", settings.portal_host, settings.portal_port)
     else:
-        log.warning("No DISCORD_TOKEN — dashboard only at http://%s:%s (set DISCORD_TOKEN to enable play).",
-                    settings.web_host, settings.web_port)
+        log.warning(
+            "No DISCORD_TOKEN — web only: dashboard at http://%s:%s, player portal at http://%s:%s "
+            "(set DISCORD_TOKEN to enable play).",
+            settings.web_host, settings.web_port, settings.portal_host, settings.portal_port,
+        )
 
     try:
         await asyncio.gather(*tasks)

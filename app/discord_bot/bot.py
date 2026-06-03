@@ -15,7 +15,7 @@ from ..content import director, scenario
 from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
-from ..engine.types import IntentTier
+from ..engine.types import CostType, IntentTier
 from ..logging_setup import finish_recording, get_logger, start_recording
 from ..state import game_state
 from . import dice_animations, embeds, i18n
@@ -182,6 +182,10 @@ async def _narrate_into_log(gs: game_state.GameState, result, *, allow_quest: bo
         prose, quest_seed = await orchestrator.narrate(gs, result), None
     if gs.event_log:
         gs.set_narration(gs.event_log[-1].id, prose)
+    # A time-cost result means in-fiction time passed — advance the world clock so the
+    # day actually progresses (and stale "清晨" summaries stop overriding it).
+    if getattr(getattr(result, "cost", None), "type", None) is CostType.TIME:
+        gs.advance_time()
     await _apply_entity_updates(gs, prose, result)
     if quest_seed is not None:
         await _handle_quest_seed(gs, result, quest_seed)
@@ -286,6 +290,11 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
             if ent_id:
                 log.info("entity delta applied: scope=%s entity=%s %s",
                          scope, ent_id, delta.model_dump(exclude_none=True))
+        # Lasting change to the place itself (not tied to a single entity) → persist on
+        # the location so it survives revisits and shows in the dynamic summary.
+        if extraction.location_note and store.append_location_state_note(scope, extraction.location_note):
+            log.info("location state note added: scope=%s note=%s",
+                     scope, extraction.location_note[:80])
     except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
         log.warning("entity update failed (%s): %s", type(exc).__name__, exc)
     try:
@@ -405,6 +414,7 @@ async def _send_freeplay_turn_prompt(channel, gs: game_state.GameState) -> None:
         return
     actor_id = gs.current_freeplay_actor_id()
     if actor_id:
+        log.info("_send_freeplay_turn_prompt: actor=%s channel=%s", actor_id, getattr(channel, "id", None))
         await channel.send(f"➡️ 輪到 **{_character_name(gs, actor_id)}** 行動。請使用 `/action` 宣告你要做的事。")
 
 
@@ -460,12 +470,13 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
     else:
         # If the player has an OPEN clarification thread, this /action is the
         # free-form reply to the prior GM follow-up — treat it like a
-        # continuation (skip the "complete your previous option" block) and
-        # attach the text to the last GM question so the parser sees it.
+        # continuation (skip the "complete your previous option" block). The
+        # reply text is recorded onto the thread only if we ask AGAIN (the tier-C
+        # branch below pushes it as that round's player utterance); on convergence
+        # it's simply consumed, so nothing to store here.
         clarif_open = gs.clarification_turn_count(pc.id) > 0
         if clarif_open:
             continue_pending = True
-            gs.record_clarification_reply(pc.id, text)
         if not await _ensure_freeplay_turn(channel, gs, pc, user, continue_pending):
             log.info("process_action: freeplay turn check rejected for %s", pc.name)
             return
@@ -534,7 +545,7 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         if hints:
             hint_line = "\n💡 例如：" + "、".join(i18n.text(o) for o in hints[:3])
 
-        gs.push_clarification(pc.id, question)
+        gs.push_clarification(pc.id, text, question)
         if not in_combat:
             gs.begin_freeplay_action(pc.id)
         await _persist(gs)
@@ -667,7 +678,13 @@ def _resolve_travel_target(gs, target: str) -> dict | None:
         names = [here.get("name", "")] + list(here.get("aliases") or [])
         t = target.strip().lower()
         if any(n and (t == n.lower() or t in n.lower() or n.lower() in t) for n in names):
-            # "leave here" — pick the nearest authored exit, else create a generic outside.
+            # "leave here" — step out to the containing area (parent) when known, else the
+            # nearest authored exit, else create a generic outside.
+            parent_id = (here.get("flags") or {}).get("parent")
+            if parent_id:
+                parent = store.get_entity_by_id(parent_id)
+                if parent:
+                    return parent
             for other in store.get_locations():
                 if other["id"] != here["id"]:
                     return other
@@ -704,6 +721,7 @@ async def _begin_travel(channel, user, gs, pc, intent) -> None:
         gs.goto_scene(scene_def)
     else:
         gs.goto_location(loc["id"], title=loc["name"], summary=loc.get("notes") or "")
+    gs.advance_time()  # travelling between places consumes part of the day
     await _persist(gs)
     await _open_current_scene(channel, gs)
     if not (gs.combat and gs.combat.active):
@@ -939,9 +957,19 @@ async def _maybe_resolve_climax(channel, gs, result) -> None:
 
 
 async def _open_current_scene(channel, gs) -> None:
+    log.info("_open_current_scene: opening scene=%s channel=%s", gs.scene.id, getattr(channel, "id", None))
     async with channel.typing():
         prose = await orchestrator.open_scene(gs)
-    await channel.send(embed=embeds.scene_embed(gs, prose))
+    try:
+        embed = embeds.scene_status_embed(gs, prose, tips=gs.scene.onboarding)
+        await channel.send(embed=embed)
+        log.info("_open_current_scene: sent scene embed scene=%s", gs.scene.id)
+    except discord.HTTPException as exc:
+        log.exception("_open_current_scene: Discord rejected scene embed; sending plaintext fallback")
+        await channel.send(f"📍 **{i18n.text(gs.scene.title)}**\n{i18n.text(prose)}")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("_open_current_scene: failed to build/send scene embed; sending fallback")
+        await channel.send(f"📍 **{i18n.text(gs.scene.title)}**\n{i18n.text(prose)}")
     await _persist(gs)
     scene_def = scenario.scene_by_id(gs.scene.id)
     if scene_def and scene_def.get("encounter") and gs.scene.id == "ambush":
@@ -1065,13 +1093,17 @@ async def character(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embeds.character_embed(pc), ephemeral=True)
 
 
-@bot.tree.command(description="顯示目前場景。")
+@bot.tree.command(description="重新描述目前的場景與處境（依當前狀態即時生成）。")
 async def scene(interaction: discord.Interaction):
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請使用 `/start`。", ephemeral=True)
         return
-    await interaction.response.send_message(embed=embeds.scene_embed(gs, gs.scene.summary))
+    # Generating the recap calls the model (can take a few seconds) — defer so the
+    # interaction doesn't time out, then follow up with the live scene.
+    await interaction.response.defer()
+    prose = await orchestrator.recap_scene(gs)
+    await interaction.followup.send(embed=embeds.scene_status_embed(gs, prose))
 
 
 @bot.tree.command(description="手動擲骰，例如 /roll 1d20+3")

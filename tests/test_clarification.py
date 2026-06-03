@@ -10,27 +10,30 @@ from app.state import game_state
 
 
 # ───────────────────────── GameState clarification stack ─────────────────────────
-def test_push_clarification_records_gm_question():
+def test_push_clarification_records_player_and_question():
     gs = game_state.reset_state(channel_id=1)
-    n = gs.push_clarification("pc_bram", "兜帽客只是一臉茫然。你接下來怎麼做？")
+    # push captures the triggering utterance AND the GM follow-up in one go.
+    n = gs.push_clarification("pc_bram", "前往北方", "兜帽客只是一臉茫然。你接下來怎麼做？")
     assert n == 1
     history = gs.get_clarification("pc_bram")
     assert len(history) == 1
+    assert history[0]["player"] == "前往北方"
     assert history[0]["gm"].startswith("兜帽客只是")
-    assert history[0]["player"] == ""
 
 
-def test_record_player_reply_attaches_to_last_question():
+def test_push_captures_each_rounds_triggering_utterance():
+    # The original goal is never lost: each round stores the player's own words.
     gs = game_state.reset_state(channel_id=1)
-    gs.push_clarification("pc_bram", "兜帽客只是一臉茫然。")
-    gs.record_clarification_reply("pc_bram", "我抓住他的衣領逼他說")
+    gs.push_clarification("pc_bram", "前往北方", "你想走哪條路線？")
+    gs.push_clarification("pc_bram", "跟隨商隊路線", "哪一支商隊？")
     history = gs.get_clarification("pc_bram")
-    assert history[0]["player"] == "我抓住他的衣領逼他說"
+    assert [t["player"] for t in history] == ["前往北方", "跟隨商隊路線"]
+    assert history[0]["gm"].startswith("你想走")
 
 
 def test_clear_clarification_resets_thread():
     gs = game_state.reset_state(channel_id=1)
-    gs.push_clarification("pc_bram", "你想做什麼？")
+    gs.push_clarification("pc_bram", "我四處看看", "你想做什麼？")
     gs.clear_clarification("pc_bram")
     assert gs.get_clarification("pc_bram") == []
     assert gs.clarification_turn_count("pc_bram") == 0
@@ -38,8 +41,8 @@ def test_clear_clarification_resets_thread():
 
 def test_two_actors_track_independent_threads():
     gs = game_state.reset_state(channel_id=1)
-    gs.push_clarification("pc_bram", "Q1 for Bram")
-    gs.push_clarification("pc_lyra", "Q1 for Lyra")
+    gs.push_clarification("pc_bram", "我做點事", "Q1 for Bram")
+    gs.push_clarification("pc_lyra", "我看看", "Q1 for Lyra")
     assert gs.clarification_turn_count("pc_bram") == 1
     assert gs.clarification_turn_count("pc_lyra") == 1
     gs.clear_clarification("pc_bram")
@@ -50,14 +53,13 @@ def test_two_actors_track_independent_threads():
 
 def test_clarification_survives_snapshot_roundtrip():
     gs = game_state.reset_state(channel_id=1)
-    gs.push_clarification("pc_bram", "你想做什麼？")
-    gs.record_clarification_reply("pc_bram", "我四處看看")
+    gs.push_clarification("pc_bram", "我四處看看", "你想做什麼？")
 
     restored = game_state.GameState.from_dict(gs.to_dict())
     history = restored.get_clarification("pc_bram")
     assert len(history) == 1
-    assert history[0]["gm"] == "你想做什麼？"
     assert history[0]["player"] == "我四處看看"
+    assert history[0]["gm"] == "你想做什麼？"
 
 
 def test_max_clarification_turns_is_three():
@@ -75,7 +77,7 @@ def test_intent_prompt_omits_clarification_block_when_empty():
 def test_intent_prompt_carries_clarification_history():
     gs = game_state.reset_state(channel_id=1)
     history = [
-        {"gm": "兜帽客只是茫然地看著你。你想換個方式問嗎？", "player": "我抓他衣領"},
+        {"player": "我抓他衣領", "gm": "兜帽客只是茫然地看著你。你想換個方式問嗎？"},
     ]
     ctx = prompts.intent_context(
         gs, gs.characters["pc_bram"], "再逼他一次",

@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SAVE_DIR = ROOT_DIR / "save"
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
+PORTAL_DIR = ROOT_DIR / "portal"
 
 
 class Settings(BaseSettings):
@@ -56,8 +57,10 @@ class Settings(BaseSettings):
     # Web dashboard
     web_host: str = "127.0.0.1"
     web_port: int = 8000
+    portal_host: str = "127.0.0.1"
+    portal_port: int = 8001
     web_cors_origins: str = ""
-    portal_public_url: str = "http://localhost:8000"
+    portal_public_url: str = "http://127.0.0.1:8001"
     portal_session_secret: str = ""
     portal_cookie_secure: bool = False
     portal_cookie_samesite: str = "lax"

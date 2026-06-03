@@ -62,10 +62,31 @@ def test_requires_check_forces_roll_for_attack():
     assert resolution.requires_check(gs, intent) is True
 
 
-def test_requires_check_forces_roll_against_scene_challenge():
-    gs = _fresh()  # tavern: perception is a DC-15 challenge
+def test_requires_check_free_for_reading_held_map():
+    # tavern lists perception as a DC-15 challenge, but a map you hold is not a scene
+    # entity — a bare scene-wide skill DC must NOT force a roll for reading it.
+    gs = _fresh()
+    intent = Intent(actor_id="pc_lyra", raw_text="我查看手上的地圖",
+                    tier=IntentTier.A, action="look", approach="perception",
+                    target="地圖", needs_check=False)
+    assert resolution.requires_check(gs, intent) is False
+
+
+def test_requires_check_free_for_look_without_target():
+    # Glancing around with no specific scene obstacle is a free beat now.
+    gs = _fresh()
     intent = Intent(actor_id="pc_lyra", raw_text="I look around the room",
                     tier=IntentTier.A, action="look", approach="perception", needs_check=False)
+    assert resolution.requires_check(gs, intent) is False
+
+
+def test_requires_check_forces_roll_examining_present_scene_entity():
+    # Engaging a PRESENT scene entity (老佩林) with a skill the scene flags (perception)
+    # still rolls — the surgical replacement for the old blanket scene-challenge force.
+    gs = _fresh()
+    intent = Intent(actor_id="pc_lyra", raw_text="我仔細打量老佩林",
+                    tier=IntentTier.A, action="look", approach="perception",
+                    target="老佩林", needs_check=False)
     assert resolution.requires_check(gs, intent) is True
 
 

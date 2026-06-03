@@ -46,14 +46,25 @@ def current_location_label(state: "GameState") -> str:
 
 
 def known_exits(state: "GameState", *, limit: int = 8) -> list[dict]:
-    """Locations the party could plausibly travel to next. Excludes the current
-    location; locations are global, so this is the full registry minus 'here'."""
+    """Locations the party could plausibly travel to next. Prefers the current location's
+    authored adjacency (connects + parent); falls back to the full registry minus 'here'
+    for emergent places that carry no adjacency, so the player is never stranded."""
     try:
         all_locs = store.get_locations()
     except Exception:  # noqa: BLE001
         return []
-    here = state.current_location_id
-    return [e for e in all_locs if e["id"] != here][:limit]
+    here_id = state.current_location_id
+    by_id = {e["id"]: e for e in all_locs}
+    here_flags = (by_id.get(here_id) or {}).get("flags") or {}
+    adjacent_ids = list(here_flags.get("connects") or [])
+    parent = here_flags.get("parent")
+    if parent and parent not in adjacent_ids:
+        adjacent_ids.append(parent)
+    if adjacent_ids:
+        exits = [by_id[i] for i in adjacent_ids if i in by_id and i != here_id]
+        if exits:
+            return exits[:limit]
+    return [e for e in all_locs if e["id"] != here_id][:limit]
 
 
 def _entity_conditions(e: dict) -> list[str]:
@@ -94,6 +105,13 @@ def compose_scene_summary(state: "GameState") -> str:
     absent = [e for e in all_entities if e["status"] in store._ABSENT_STATUSES]
 
     parts = [base]
+    # Persistent place-state (tripwire disarmed, water spilled …) survives revisits.
+    try:
+        place_state = store.location_state_note(state.current_location_id)
+    except Exception:  # noqa: BLE001
+        place_state = ""
+    if place_state:
+        parts.append(f"此地已發生、且持續存在的變化：{place_state}")
     if present:
         parts.append("目前在場：\n" + "\n".join(_entity_label(e) for e in present))
     if absent:
@@ -124,6 +142,14 @@ empty by default; only include 2-3 SHORT example phrasings (≤8 chars each) whe
 clearly needs a hint. The player will reply with another natural-language /action, and \
 you'll re-interpret with that reply added to the CLARIFICATION HISTORY. Aim to converge \
 toward tier A within 1-2 rounds.
+- CONVERGING from tier C: when a CLARIFICATION HISTORY is present, the player's earlier \
+lines are their STANDING goal — COMBINE every line in the history with the new message \
+into a single tier-A intent rather than asking a further narrowing question. Example: \
+history "前往北方" → GM "哪條路線？" → now "跟隨商隊路線" should resolve to tier A \
+action="前往"/travel, target="北方"（沿商隊路線）, NOT another "which one?" question. A clear \
+movement or action declaration ("前往北方", "跟隨商隊路線", "查看晨橋商隊位置") is already \
+tier A — never re-package it into a menu. Once you have asked once and the player has \
+answered, you should almost always return tier A.
 
 PLAYER AGENCY (anti-paternalism — read this carefully):
 - The player has full AUTHORIAL agency over their character's actions. Silly, embarrassing, \
@@ -153,6 +179,11 @@ with a friendly character. These simply happen; no dice.
 - Set `needs_check` TRUE whenever there is any opposition, risk, a meaningful chance of \
 failure, a guarded/wary/hostile target, or a contested skill. Attacking, sneaking, \
 persuading, deceiving, intimidating, and picking locks ALWAYS need a check.
+- CONSULTING information you ALREADY hold or that is already revealed is FALSE: reading a \
+map you carry, re-reading a sign or notice, glancing at notes you've taken, recalling \
+something already established. SEARCHING for HIDDEN or UNKNOWN things is TRUE: spotting a \
+trap, finding eavesdroppers, searching wreckage for clues, scanning for what isn't obvious. \
+So "查看地圖"（手上已有地圖）→ tier A, needs_check=false; "搜索房間找偷聽者" → needs_check=true.
 - When unsure, set `needs_check` TRUE. The program may still force a check; it never \
 forces a free success.
 
@@ -171,6 +202,10 @@ strange they read — return tier A and let the engine + narrator handle consequ
 - Risky or stupid moves ("徒手抓刀刃", "對著火堆深呼吸")
 - Insulting an NPC, propositioning an NPC, breaking decorum
 - Physically possible but absurd attempts ("跟桌子說話", "對牆壁施展魅惑")
+- Pure movement/travel declarations ("前往北方", "跟隨商隊路線前往北方", "往東路走") are \
+NEVER implausible — the program's travel system resolves the destination. Return tier A \
+(action="前往"/travel, target=the place) with implausible=false, even if the place is not \
+yet listed in EXITS.
 
 A merely risky-but-possible action is NOT implausible. A socially awkward action is NOT \
 implausible. Possessing an item in INVENTORY is NOT implausible. When in doubt, return \
@@ -208,24 +243,41 @@ def _condition_brief(present: list[dict]) -> str:
 
 
 def _clarification_block(history: list[dict] | None) -> str:
-    """Format the open follow-up thread for the parser: each turn = one GM
-    question (the prior round's clarification) + the player's reply that came
-    after. Lets the parser converge instead of asking the same question twice."""
+    """Format the open follow-up thread for the parser. Each turn = the player's
+    utterance that round + the GM follow-up that came after it. Printing the
+    player's OWN words (oldest first) keeps the original goal in view so the parser
+    merges the whole thread into one intent instead of anchoring on its own last
+    question — the root of the "doesn't remember what the player just said" loop."""
     if not history:
         return ""
     lines: list[str] = []
     for i, turn in enumerate(history, 1):
-        gm = (turn.get("gm") or "").strip()
         pl = (turn.get("player") or "").strip()
-        if gm:
-            lines.append(f"  round {i} GM: {truncate(gm, 160)}")
+        gm = (turn.get("gm") or "").strip()
         if pl:
             lines.append(f"  round {i} player: {truncate(pl, 160)}")
+        if gm:
+            lines.append(f"  round {i} GM: {truncate(gm, 160)}")
     if not lines:
         return ""
+    # Lazy import: game_state does not import this module, so no cycle.
+    from ..state.game_state import GameState
+    this_round = len(history) + 1
+    if this_round >= GameState.MAX_CLARIFICATION_TURNS:
+        pressure = (
+            " This is the FINAL clarification round — you MUST return tier A (or the "
+            "closest playable action) now; do NOT ask another question."
+        )
+    else:
+        pressure = (
+            " As soon as a verb + target are identifiable from the COMBINED thread, "
+            "return tier A NOW — do not ask a further narrowing question."
+        )
     return (
-        "CLARIFICATION HISTORY (you are mid-conversation — use this to converge to "
-        "tier A this round; do NOT repeat the same question):\n" + "\n".join(lines)
+        f"CLARIFICATION HISTORY (you are mid-conversation; this is round {this_round}). "
+        "Treat every player line above PLUS the message below as ONE accumulating intent "
+        "— merge them; do not reset to the latest line alone." + pressure + "\n"
+        + "\n".join(lines)
     )
 
 
@@ -330,7 +382,16 @@ def _entities_block(state: "GameState") -> str:
     absent = [e for e in all_entities if e["status"] in store._ABSENT_STATUSES]
     lines = []
     if present:
-        lines.append("HERE NOW:\n" + "\n".join(_entity_label(e) for e in present))
+        present_lines = []
+        for e in present:
+            line = _entity_label(e)
+            # NPC agenda is GM-only steering — surface it to the narrator so motives drive
+            # behaviour, but flag it as not-to-be-revealed outright.
+            agenda = (e.get("flags") or {}).get("agenda") if isinstance(e.get("flags"), dict) else None
+            if agenda:
+                line += f"\n  （暗中目標，僅供你鋪陳、勿直接揭露：{truncate(agenda, 80)}）"
+            present_lines.append(line)
+        lines.append("HERE NOW:\n" + "\n".join(present_lines))
     if absent:
         gone = "、".join(e["name"] for e in absent)
         lines.append(f"NO LONGER PRESENT (do NOT bring them back into this location): {gone}")
@@ -364,6 +425,7 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
     entities = _entities_block(state)
     parts = [
         f"LOCATION: {current_location_label(state)}\n{compose_scene_summary(state)}",
+        f"現在時段：{state.time_of_day()}（以此為準；場景描述若暗示其他時間，一律以此時段為準）",
     ]
     if entities:
         parts.append(entities)
@@ -487,13 +549,41 @@ Write ONLY in Traditional Chinese."""
 
 
 def scene_context(state: "GameState") -> str:
-    npcs = ", ".join(state.scene.npcs) if state.scene.npcs else "none"
-    return (
-        f"LOCATION: {current_location_label(state)}\n"
-        f"SUMMARY: {state.scene.summary}\n"
-        f"NPCs present: {npcs}\n"
-        "Establish this location now in Traditional Chinese:"
-    )
+    """Live context for the location opener (incl. the first /start description). Feeds the
+    dynamic composed summary — the authored premise as a HIDDEN seed plus persistent changes
+    and the entities actually present — instead of the static blurb, so the opening is
+    generated fresh and stays consistent with real state."""
+    return "\n".join([
+        f"LOCATION: {current_location_label(state)}",
+        compose_scene_summary(state),
+        f"現在時段：{state.time_of_day()}（以此為準；場景描述若暗示其他時間，一律以此時段為準）",
+        "Establish this location now in Traditional Chinese:",
+    ])
+
+
+# ───────────────────────── Scene recap (/scene) ─────────────────────────
+SCENE_RECAP_SYSTEM = """You are the GAME MASTER re-describing the situation AS IT CURRENTLY \
+STANDS in a D&D 5e session (the table asked to look around again). In 2-4 vivid sentences, \
+present tense, describe where the party is now, who and what is present, and the current \
+mood. Base it ONLY on the live state given (location, present/absent entities, persistent \
+changes, time of day, recent events). Do NOT resolve actions, roll dice, invent new \
+mechanics, or reintroduce anyone listed as no longer present. End by inviting the party to \
+act. Write ONLY in Traditional Chinese."""
+
+
+def scene_recap_context(state: "GameState") -> str:
+    """Live context for /scene: the dynamic summary (base + persistent changes + present/
+    absent entities), the current time, and a few recent beats — never the static blurb."""
+    window = min(settings.narrate_context_window, 6)
+    recent = state.event_log[-window:] if state.event_log else []
+    history = "\n".join(_event_line(e) for e in recent) or "-（剛抵達此地，尚無事件）"
+    return "\n".join([
+        f"LOCATION: {current_location_label(state)}",
+        compose_scene_summary(state),
+        f"現在時段：{state.time_of_day()}（以此為準）",
+        f"RECENT EVENTS:\n{history}",
+        "Describe the current situation now in Traditional Chinese:",
+    ])
 
 
 # ───────────────────────── Entity-state extractor ─────────────────────────
@@ -521,6 +611,10 @@ entity already has.
 a person/creature/object that appears, OR a named place the narration introduces (use \
 `register_kind`:"location"). Reporting a new place is just a candidate — the engine \
 decides when it becomes permanent, so report it whenever it is clearly named.
+- Set `location_note` ONLY for a lasting change to the PLACE itself that is not tied to \
+any single entity — e.g. a trap is disarmed, a fire is lit, water is spilled, a door is \
+broken open. Leave it null for ordinary movement or for changes already captured by an \
+entity delta above.
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):
 {EXTRACT_JSON_SHAPE}"""

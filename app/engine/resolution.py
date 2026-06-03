@@ -123,9 +123,16 @@ def requires_check(state: "GameState", intent: Intent) -> bool:
     """Engine gate over the parser's `needs_check` proposal (design §8.3).
 
     Returns True when the action MUST roll regardless of what the AI proposed — i.e.
-    the action is an attack, uses a contested skill, hits a scene-authored challenge,
-    or targets a wary/afraid/hostile entity. Trivial, uncontested beats return False
-    and may be narrated without a roll.
+    the action is an attack, uses a contested skill, targets a wary/afraid/hostile
+    entity, or ENGAGES A PRESENT SCENE OBSTACLE with a skill the scene flags as
+    DC-worthy. Trivial, uncontested beats return False and may be narrated without a
+    roll.
+
+    Note: a bare skill listed in `scene.challenges` no longer forces a check on its
+    own — it only does so when the action actually targets a present scene entity.
+    Otherwise a scene-wide `perception` DC (meant for "scan for eavesdroppers") would
+    force a roll for reading a map you already hold. `scene.challenges` still owns the
+    DC via `determine_dc` once a roll is warranted.
 
     A target condition that short-circuits the roll (auto-success / auto-fail) also
     returns False here — `resolve` will produce the outcome without a d20 so the
@@ -139,13 +146,18 @@ def requires_check(state: "GameState", intent: Intent) -> bool:
     skill = normalize_approach(intent.approach or intent.action)
     if skill in CONTESTED_SKILLS:
         return True
-    if skill in state.scene.challenges:        # the scene author flagged a DC here
-        return True
     if intent.target:
         from ..db import store
         ent = store.find_by_ref(state.current_location_id, intent.target)
-        if ent and ent.get("disposition") in ("wary", "afraid", "hostile"):
-            return True
+        if ent:
+            # A wary/afraid/hostile target always resists — roll regardless of skill.
+            if ent.get("disposition") in ("wary", "afraid", "hostile"):
+                return True
+            # Engaging a PRESENT scene obstacle with a skill the author flagged here
+            # (e.g. examining the tripwire, searching the wagons) → roll. Reading a
+            # held map — whose target is not a present scene entity — stays free.
+            if skill in state.scene.challenges and ent.get("status") not in store._ABSENT_STATUSES:
+                return True
     return False
 
 

@@ -443,12 +443,14 @@ def find_location(ref: str) -> dict | None:
 
 
 def register_location(name: str, *, location_id: str | None = None,
-                      aliases: list[str] | None = None, notes: str = "") -> dict:
-    """Create (or refresh) a global location entity and return it."""
+                      aliases: list[str] | None = None, notes: str = "",
+                      flags: dict | None = None) -> dict:
+    """Create (or refresh) a global location entity and return it. `flags` may carry
+    adjacency: {"connects": [loc_ids], "parent": loc_id} — used to bound travel."""
     ent_id = location_id or f"loc_{uuid.uuid4().hex[:10]}"
     upsert_entity(
         id=ent_id, scene_id=LOCATION_SCOPE, kind="location", name=name.strip(),
-        aliases=aliases or [], status="present", notes=notes,
+        aliases=aliases or [], status="present", notes=notes, flags=flags or {},
     )
     return get_entity_by_id(ent_id)  # type: ignore[return-value]
 
@@ -459,10 +461,35 @@ def seed_locations(defs: list[dict]) -> None:
     for d in defs:
         if d.get("id") and get_entity_by_id(d["id"]):
             continue
+        adjacency: dict = {}
+        if d.get("connects"):
+            adjacency["connects"] = list(d["connects"])
+        if d.get("parent"):
+            adjacency["parent"] = d["parent"]
         register_location(
             d["name"], location_id=d.get("id"),
             aliases=d.get("aliases", []), notes=d.get("notes", ""),
+            flags=adjacency or None,
         )
+
+
+def move_entity(ent_id: str, dest_location_id: str) -> bool:
+    """Relocate an entity to another registered location (design: NPCs can roam). Presence
+    is scoped by scene_id, so a move re-scopes the entity there and keeps location_id in
+    sync. Returns True if moved. The destination must be a known location."""
+    ent = get_entity_by_id(ent_id)
+    if not ent:
+        return False
+    dest = get_entity_by_id(dest_location_id) or find_location(dest_location_id)
+    if not dest or dest.get("kind") != "location":
+        return False
+    upsert_entity(
+        id=ent["id"], scene_id=dest["id"], kind=ent["kind"], name=ent["name"],
+        aliases=ent.get("aliases", []), status=ent["status"], location_id=dest["id"],
+        disposition=ent.get("disposition"), flags=ent.get("flags", {}),
+        notes=ent.get("notes", ""), first_seen_event_id=ent.get("first_seen_event_id"),
+    )
+    return True
 
 
 def resolve_or_register_location(ref: str) -> dict | None:
@@ -692,6 +719,19 @@ def get_meta_by_ref(scene_id: str | None, ref: str) -> dict[str, dict]:
     return dict(_flags_with_conditions(ent).get(_CONDITION_META_KEY, {}))
 
 
+# Keep accumulated notes bounded so a long-lived entity (or place) can't grow an
+# ever-expanding fact log that bloats prompts. We pin the FIRST line (seed identity)
+# and keep the most recent facts after it.
+_MAX_NOTE_LINES = 6
+
+
+def _cap_notes(notes: str) -> str:
+    lines = [ln for ln in (notes or "").split("\n") if ln.strip()]
+    if len(lines) <= _MAX_NOTE_LINES:
+        return "\n".join(lines)
+    return "\n".join([lines[0]] + lines[-(_MAX_NOTE_LINES - 1):])
+
+
 def apply_delta(scene_id: str | None, delta: dict) -> str | None:
     """Apply one validated state delta. Resolves entity by ref; can register a new
     one when `register_kind` is given. Returns the affected entity id (or None).
@@ -722,21 +762,24 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
     note = delta.get("note")
     notes = ent["notes"]
     if note:
-        notes = (notes + "\n" + note).strip() if notes else note
+        notes = _cap_notes((notes + "\n" + note).strip() if notes else note)
     # Location writes are validated against the global registry: the extractor may move an
-    # entity to a KNOWN place but cannot strand it at a hallucinated location_id. It can
-    # never move the party — party_location_id is engine-only (see GameState invariant).
+    # entity to a KNOWN place (presence follows it — see move_entity) but cannot strand it
+    # at a hallucinated location_id. It can never move the party — party_location_id is
+    # engine-only (see GameState invariant).
     new_location_id = ent["location_id"]
+    scene_for_upsert = ent["scene_id"]
     requested_loc = delta.get("location_id")
     if requested_loc:
         loc = get_entity_by_id(requested_loc) or find_location(requested_loc)
         if loc is not None and loc.get("kind") == "location":
             new_location_id = loc["id"]
+            scene_for_upsert = loc["id"]  # relocate: presence is scoped by scene_id
         else:
             log.info("apply_delta: dropped unknown location_id=%r for entity %s",
                      requested_loc, ent["id"])
     upsert_entity(
-        id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
+        id=ent["id"], scene_id=scene_for_upsert, kind=ent["kind"], name=ent["name"],
         aliases=ent.get("aliases", []),
         status=status if status in ENTITY_STATUSES else ent["status"],
         location_id=new_location_id,
@@ -754,6 +797,38 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
         if isinstance(cid, str) and cid:
             remove_condition(ent["id"], cid)
     return ent["id"]
+
+
+# ───────────────────────── location persistent state ─────────────────────────
+def append_location_state_note(location_id: str, note: str) -> bool:
+    """Record a lasting change to a PLACE itself (not tied to a person/object) — e.g.
+    'the tripwire is disarmed', 'a waterskin spilled here'. Stored on the location
+    entity's flags so it survives revisits and is folded into the dynamic summary.
+    Capped like entity notes. Returns True if written."""
+    if not location_id or not note or not note.strip():
+        return False
+    loc = get_entity_by_id(location_id)
+    if not loc or loc.get("kind") != "location":
+        return False
+    flags = dict(loc.get("flags") or {})
+    existing = flags.get("state_notes") or ""
+    flags["state_notes"] = _cap_notes((existing + "\n" + note).strip() if existing else note.strip())
+    upsert_entity(
+        id=loc["id"], scene_id=loc["scene_id"], kind=loc["kind"], name=loc["name"],
+        aliases=loc.get("aliases", []), status=loc["status"],
+        location_id=loc.get("location_id"), disposition=loc.get("disposition"),
+        flags=flags, notes=loc.get("notes", ""),
+        first_seen_event_id=loc.get("first_seen_event_id"),
+    )
+    return True
+
+
+def location_state_note(location_id: str) -> str:
+    """The accumulated persistent place-state for a location (may be empty)."""
+    loc = get_entity_by_id(location_id) if location_id else None
+    if not loc or loc.get("kind") != "location":
+        return ""
+    return ((loc.get("flags") or {}).get("state_notes") or "").strip()
 
 
 # ───────────────────────── scene_state ─────────────────────────

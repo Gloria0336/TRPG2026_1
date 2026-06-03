@@ -1,7 +1,7 @@
 """Player portal API.
 
 The localhost dashboard remains read-only. These routes are for the separate
-Vercel-hosted player portal: Discord OAuth, player status, quest board, and
+player portal: Discord OAuth, player status, quest board, and
 lightweight player-created character records.
 """
 from __future__ import annotations

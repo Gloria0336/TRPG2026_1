@@ -11,6 +11,7 @@ env/
 
 # Env / secrets
 .env
+.cloudflare/
 
 # Save snapshots / runtime state (the app re-creates save/ on launch)
 save/

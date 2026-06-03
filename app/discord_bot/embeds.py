@@ -48,13 +48,29 @@ def roster_embed(state: GameState) -> discord.Embed:
     return e
 
 
-def scene_embed(state: GameState, prose: str) -> discord.Embed:
-    e = discord.Embed(title=i18n.text(state.scene.title), description=i18n.text(prose or state.scene.summary), color=GOLD)
-    if state.scene.npcs:
-        e.add_field(name="在場角色", value=", ".join(i18n.text(n) for n in state.scene.npcs), inline=False)
-    if state.scene.onboarding:
-        tips = "\n".join(f"• {i18n.text(t)}" for t in state.scene.onboarding)
-        e.add_field(name="你可以嘗試", value=tips, inline=False)
+
+
+def scene_status_embed(state: GameState, prose: str, *, tips: list[str] | None = None) -> discord.Embed:
+    """Live scene view (used by /scene AND the location opener). Reads the location label and
+    the entities actually present right now (not the static authored scene list), so a
+    departed NPC doesn't linger and the header reflects where the party currently is.
+    `tips` optionally appends the onboarding hints shown when first entering a location."""
+    from ..db import store
+
+    title = state.scene.title
+    try:
+        loc = store.get_entity_by_id(state.current_location_id)
+        if loc and loc.get("name"):
+            title = loc["name"]
+    except Exception:  # noqa: BLE001 — formatting must never break the command
+        pass
+    e = discord.Embed(title=i18n.text(title), description=i18n.text(prose), color=GOLD)
+    present = [p for p in state.present_entities() if p.get("kind") != "location"]
+    if present:
+        e.add_field(name="在場", value="、".join(i18n.text(p["name"]) for p in present), inline=False)
+    if tips:
+        e.add_field(name="你可以嘗試", value="\n".join(f"• {i18n.text(t)}" for t in tips), inline=False)
+    e.set_footer(text=f"時段：{state.time_of_day()}")
     return e
 
 

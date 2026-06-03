@@ -53,6 +53,11 @@ def _dashboard_quest(q: dict) -> dict:
     return payload
 
 
+# Ordered day stages (design: time is world state, not narrator whim). Advances on travel
+# and on time-cost results; clamps at the final stage for a single one-shot day.
+TIME_OF_DAY_STAGES = ["清晨", "上午", "下午", "傍晚", "夜晚"]
+
+
 # ───────────────────────── Scene ─────────────────────────
 @dataclass
 class Scene:
@@ -227,7 +232,11 @@ class GameState:
     # ── clarification stack (per-actor C-tier follow-up history) ──
     # Each actor can have at most one open clarification thread at a time. We
     # store them as a dict keyed by actor_id so two PCs can converge in parallel.
-    # Each entry: {"turns": [{"gm": str, "player": str}], "started_ts": float}.
+    # Each turn = {"player": str, "gm": str}: the player's utterance that round
+    # plus the GM follow-up that came after it. Capturing the player's words (not
+    # just the GM's question) keeps the ORIGINAL goal in the history so the parser
+    # merges the whole thread into one intent instead of anchoring on its own last
+    # question — the "doesn't remember what the player just said" bug.
     # MAX_CLARIFICATION_TURNS bounds the loop — if we still haven't converged
     # the dispatcher gives up and narrates a no-roll beat so play moves on.
     MAX_CLARIFICATION_TURNS = 3
@@ -241,23 +250,17 @@ class GameState:
         entry = self._clarification_store().get(actor_id)
         return list(entry.get("turns", [])) if entry else []
 
-    def push_clarification(self, actor_id: str, gm_question: str, player_reply: str = "") -> int:
-        """Record one GM-question / player-reply pair on the actor's open thread.
-        Returns the new total turn count (use to enforce MAX_CLARIFICATION_TURNS)."""
+    def push_clarification(self, actor_id: str, player_text: str, gm_question: str) -> int:
+        """Record one round on the actor's open thread: the player's utterance that
+        triggered this round + the GM follow-up we're about to post. The triggering
+        utterance is captured HERE (not on the next /action) so the player's words
+        are never lost from the history. Returns the new total turn count (use to
+        enforce MAX_CLARIFICATION_TURNS)."""
         store = self._clarification_store()
         entry = store.setdefault(actor_id, {"turns": []})
-        entry["turns"].append({"gm": gm_question, "player": player_reply})
+        entry["turns"].append({"player": player_text, "gm": gm_question})
         self.bump()
         return len(entry["turns"])
-
-    def record_clarification_reply(self, actor_id: str, player_reply: str) -> None:
-        """Attach the player's next utterance to the most-recent GM question
-        (called as the new /action arrives, before re-interpreting it)."""
-        entry = self._clarification_store().get(actor_id)
-        if not entry or not entry.get("turns"):
-            return
-        entry["turns"][-1]["player"] = player_reply
-        self.bump()
 
     def clear_clarification(self, actor_id: str) -> None:
         store = self._clarification_store()
@@ -292,6 +295,21 @@ class GameState:
         self._mark_visited(scene_def["id"])
         self._seed_scene_memory(scene_def)
         self.bump()
+
+    # ── time of day (world state) ──
+    def time_of_day(self) -> str:
+        cur = self.flags.get("time_of_day")
+        return str(cur) if cur in TIME_OF_DAY_STAGES else TIME_OF_DAY_STAGES[1]
+
+    def advance_time(self, steps: int = 1) -> str:
+        """Move the clock forward, clamped at the last stage (one-shot spans one day)."""
+        i = TIME_OF_DAY_STAGES.index(self.time_of_day())
+        i = min(i + max(int(steps), 0), len(TIME_OF_DAY_STAGES) - 1)
+        new = TIME_OF_DAY_STAGES[i]
+        if new != self.flags.get("time_of_day"):
+            self.flags["time_of_day"] = new
+            self.bump()
+        return new
 
     def _mark_visited(self, location_id: str) -> None:
         """Append to the party's visited-locations trail (drives the goal director)."""
@@ -534,6 +552,7 @@ def new_game(channel_id: int | None = None) -> "GameState":
     for pc in premade_pcs():
         gs.characters[pc.id] = pc
         gs.pc_ids.append(pc.id)
+    gs.flags["time_of_day"] = TIME_OF_DAY_STAGES[1]  # campaign opens mid-morning
     gs.goto_scene(scenario.first_scene())
     gs.started = True
     gs.add_system_event("scene", f"新的冒險開始：{scenario.TITLE}")
