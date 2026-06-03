@@ -1,8 +1,9 @@
 """Validated schema for the intent-parser's JSON output.
 
 The model's reply is parsed into this pydantic model; anything malformed is rejected
-and retried/fallback-ed. `suggested_dc` is further snapped to a 5e anchor by the engine,
-so even a stray number cannot set an arbitrary DC.
+and retried/fallback-ed. The parser proposes a difficulty `band` (action-method
+difficulty) plus a clamped `env_modifier` (scene/target difficulty); the engine composes
+them via rules_5e.dc_from_band, so even stray numbers can't set an arbitrary DC.
 """
 from __future__ import annotations
 
@@ -13,7 +14,10 @@ from pydantic import BaseModel, Field, field_validator
 from ..content import quest_taxonomy
 from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES
 from ..engine import conditions as cond
-from ..engine.rules_5e import DC_ANCHORS
+from ..engine import rules_5e
+
+# Difficulty bands the parser may pick for the action's *method* (design §4.3).
+DIFFICULTY_BANDS = ["very_easy", "easy", "normal", "hard", "extreme", "legendary"]
 
 # 5e skills the parser may pick as an `approach`.
 ALLOWED_SKILLS = [
@@ -21,6 +25,20 @@ ALLOWED_SKILLS = [
     "insight", "intimidation", "investigation", "medicine", "nature", "perception",
     "performance", "persuasion", "religion", "sleight_of_hand", "stealth", "survival",
 ]
+
+
+class DCAssessment(BaseModel):
+    """Auditable DC breakdown: base (action-method band) + env_modifier (scene/target).
+
+    `final_dc = max(MIN_DC, base_dc + env_modifier)` — computed by rules_5e.dc_from_band,
+    intentionally NOT snapped to an anchor. Carried alongside the Intent so the engine
+    and event log can record *why* a DC landed where it did.
+    """
+
+    base_dc: int
+    env_modifier: int
+    final_dc: int
+    env_reason: str | None = None
 
 
 class IntentParse(BaseModel):
@@ -43,7 +61,15 @@ class IntentParse(BaseModel):
     candidates: list[str] = Field(default_factory=list)   # tier B: 2-4 candidate methods
     question: str | None = None              # tier C: one clarifying question
     options: list[str] = Field(default_factory=list)      # tier C: option labels
-    suggested_dc: int | None = None          # only used for off-table actions
+    # DC = base (action-method difficulty band) + env_modifier (scene/target difficulty).
+    # `difficulty_band` is null for on-table actions (scene fixed DC) or when no roll is
+    # needed; the engine then uses its default. Tools/allies/resources are NEVER folded in
+    # here — those are applied to the player's roll by the engine (§4.9).
+    difficulty_band: Literal[
+        "very_easy", "easy", "normal", "hard", "extreme", "legendary"
+    ] | None = None
+    env_modifier: int = 0                    # scene/target offset, clamped to ±ENV_MODIFIER_CAP
+    env_reason: str | None = None            # short audit note for the env_modifier
     # True when the message relies on a false premise — gear the actor does not carry, or a
     # fact not established in the scene (e.g. "I detonate the C4 I hid earlier"). The bot
     # then gives an in-world redirect instead of an options menu that would legitimise it.
@@ -56,10 +82,27 @@ class IntentParse(BaseModel):
     def _none_to_empty(cls, value: object) -> object:
         return [] if value is None else value
 
-    def snapped_dc(self) -> int | None:
-        if self.suggested_dc is None:
+    @field_validator("env_modifier", mode="before")
+    @classmethod
+    def _env_modifier_default(cls, value: object) -> int:
+        # A creative model may omit it or send null; treat as no offset. Hard clamping
+        # to ±cap happens in dc_from_band so the stored value is always in range.
+        if value is None:
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def dc_assessment(self) -> "DCAssessment | None":
+        """Compose the auditable DC breakdown, or None when no band was proposed
+        (on-table / no-roll actions fall back to the engine's default)."""
+        if self.difficulty_band is None:
             return None
-        return min(DC_ANCHORS, key=lambda a: abs(a - self.suggested_dc))
+        final, base, env = rules_5e.dc_from_band(self.difficulty_band, self.env_modifier)
+        return DCAssessment(
+            base_dc=base, env_modifier=env, final_dc=final, env_reason=self.env_reason
+        )
 
 
 # ───────────────────────── Entity-state extraction ─────────────────────────
@@ -245,7 +288,9 @@ INTENT_JSON_SHAPE = (
     '  "candidates": [2-4 concrete method options]   // tier B only,\n'
     '  "question": one short clarifying question | null  // tier C only,\n'
     '  "options": [2-4 option labels]                 // tier C only,\n'
-    '  "suggested_dc": 5|10|15|20|25|30|35 | null,    // only for unusual off-table actions\n'
+    '  "difficulty_band": "very_easy|easy|normal|hard|extreme|legendary" | null,  // how hard the player\'s chosen METHOD is; null for on-table/no-roll\n'
+    '  "env_modifier": integer in -4..+4,             // scene/target difficulty: favourable→negative, hostile→positive\n'
+    '  "env_reason": short reason for env_modifier | null,\n'
     '  "implausible": true if the message relies on gear the actor lacks or a fact not in the scene, else false\n'
     '}'
 )

@@ -98,16 +98,35 @@ def test_requires_check_forces_roll_against_wary_target():
 
 
 def test_determine_dc_uses_scene_table():
-    gs = _fresh()  # tavern: persuasion DC 13
+    gs = _fresh()  # tavern: persuasion fixed DC 15
     intent = Intent(actor_id="pc_lyra", raw_text="persuade", tier=IntentTier.A, approach="persuasion")
-    assert resolution.determine_dc(gs, intent, None) == 13
+    assert resolution.determine_dc(gs, intent, None) == 15
 
 
-def test_determine_dc_snaps_proposed_to_anchor():
+def test_determine_dc_from_assessment():
+    from app.ai.schemas import DCAssessment
     gs = _fresh()
+    intent = Intent(actor_id="pc_bram", raw_text="kick the door", tier=IntentTier.A, approach="athletics")
+    # athletics not in tavern table → use the AI assessment's final DC verbatim (no snap).
+    a = DCAssessment(base_dc=25, env_modifier=4, final_dc=29, env_reason="監牢大門")
+    assert resolution.determine_dc(gs, intent, a) == 29
+
+
+def test_determine_dc_can_drop_below_ladder_floor():
+    from app.ai.schemas import DCAssessment
+    gs = _fresh()
+    intent = Intent(actor_id="pc_bram", raw_text="pick the simple lock", tier=IntentTier.A,
+                    approach="sleight_of_hand")
+    # right tool on an easy target: base 5 − 3 → DC 2 (intentionally not snapped up to 5).
+    a = DCAssessment(base_dc=5, env_modifier=-3, final_dc=2, env_reason="普通木門")
+    assert resolution.determine_dc(gs, intent, a) == 2
+
+
+def test_determine_dc_defaults_to_normal():
+    gs = _fresh()
+    # acrobatics not in tavern table, no assessment → default normal=15.
     intent = Intent(actor_id="pc_bram", raw_text="balance on a beam", tier=IntentTier.A, approach="acrobatics")
-    # acrobatics not in tavern table → proposed DC 14 snaps to 15
-    assert resolution.determine_dc(gs, intent, 14) == 15
+    assert resolution.determine_dc(gs, intent, None) == 15
 
 
 def test_normalize_approach_synonyms():

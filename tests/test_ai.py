@@ -116,12 +116,23 @@ def test_intent_prompt_requires_chinese_player_facing_options():
     assert "`question`, `candidates`, and `options`" in prompts.INTENT_SYSTEM
 
 
-def test_suggested_dc_snaps_to_anchor():
-    # Even if a model returns an odd number, it snaps to a 5e anchor.
-    p = IntentParse(tier="A", approach="acrobatics", suggested_dc=17)
-    assert p.snapped_dc() == 15
-    p2 = IntentParse(tier="A", suggested_dc=23)
-    assert p2.snapped_dc() == 25
+def test_dc_assessment_composes_band_and_env():
+    # band → base DC, env modifier added on top; final is NOT snapped to an anchor.
+    p = IntentParse(tier="A", approach="athletics", difficulty_band="extreme", env_modifier=4)
+    a = p.dc_assessment()
+    assert (a.base_dc, a.env_modifier, a.final_dc) == (25, 4, 29)
+
+
+def test_dc_assessment_clamps_env_modifier():
+    # An out-of-range env modifier is clamped to ±ENV_MODIFIER_CAP by dc_from_band.
+    p = IntentParse(tier="A", approach="sleight_of_hand", difficulty_band="very_easy", env_modifier=-9)
+    a = p.dc_assessment()
+    assert a.env_modifier == -4 and a.final_dc == 1   # max(MIN_DC, 5 − 4)
+
+
+def test_dc_assessment_none_without_band():
+    # No band proposed → no assessment; the engine falls back to its default DC.
+    assert IntentParse(tier="A", approach="acrobatics").dc_assessment() is None
 
 
 def test_intent_parse_rejects_bad_tier():

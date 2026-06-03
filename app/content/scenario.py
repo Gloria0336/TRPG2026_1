@@ -79,8 +79,8 @@ SCENES: list[dict] = [
             },
         ],
         "challenges": {
-            "persuasion": 13,
-            "insight": 12,
+            "persuasion": 15,
+            "insight": 15,
             "perception": 15,
             "intimidation": 15,
         },
@@ -120,10 +120,10 @@ SCENES: list[dict] = [
             },
         ],
         "challenges": {
-            "investigation": 12,
-            "survival": 13,
-            "perception": 13,
-            "acrobatics": 12,
+            "investigation": 15,
+            "survival": 15,
+            "perception": 15,
+            "acrobatics": 15,
         },
         "cost_pool": ["time", "trace", "resource"],
         "onboarding": [

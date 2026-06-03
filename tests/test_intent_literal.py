@@ -5,7 +5,7 @@ verb + target (even if the topic is silly, taboo, or off-script) must classify
 as tier A and carry the specific topic through to the narrator. implausibility
 is reserved for world-contradicting actions only."""
 from app.ai import prompts
-from app.ai.schemas import INTENT_JSON_SHAPE, IntentParse
+from app.ai.schemas import DCAssessment, INTENT_JSON_SHAPE, IntentParse
 from app.engine import resolution
 from app.engine.types import Intent, IntentTier, ResolutionResult, ResultKind
 from app.state import game_state
@@ -46,7 +46,7 @@ def test_resolve_propagates_topic_to_result():
         tier=IntentTier.A, action="詢問", target="兜帽客",
         approach="persuasion", topic="內褲顏色",
     )
-    result = resolution.resolve(gs, intent, proposed_dc=10)
+    result = resolution.resolve(gs, intent, assessment=DCAssessment(base_dc=10, env_modifier=0, final_dc=10))
     assert result.topic == "內褲顏色"
 
 

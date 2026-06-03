@@ -486,12 +486,13 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
 
     clarification = gs.get_clarification(actor_id)
     async with channel.typing():
-        intent, proposed_dc = await orchestrator.interpret(
+        intent, assessment = await orchestrator.interpret(
             gs, actor_id, text, clarification=clarification,
         )
 
-    log.info("process_action: dispatch intent.tier=%s action=%s target=%s approach=%s is_attack=%s implausible=%s proposed_dc=%s",
-             intent.tier.value, intent.action, intent.target, intent.approach, intent.is_attack, intent.implausible, proposed_dc)
+    log.info("process_action: dispatch intent.tier=%s action=%s target=%s approach=%s is_attack=%s implausible=%s dc=%s",
+             intent.tier.value, intent.action, intent.target, intent.approach, intent.is_attack, intent.implausible,
+             assessment.final_dc if assessment else None)
 
     # False-premise guard (design §8.3 anti-talk): a message relying on gear the actor
     # lacks or a fact not in the scene gets an in-world redirect, NOT a menu that would
@@ -568,17 +569,19 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         await _begin_scene_combat(channel, gs)
     elif intent.needs_check:
         log.info("process_action → _begin_check (out-of-combat check)")
-        await _begin_check(channel, user, gs, pc, intent, proposed_dc)
+        await _begin_check(channel, user, gs, pc, intent, assessment)
     else:
         log.info("process_action → _begin_narrative (trivial no-roll beat)")
         await _begin_narrative(channel, user, gs, pc, intent)
 
 
-async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
+async def _begin_check(channel, user, gs, pc, intent, assessment) -> None:
     skill = resolution.normalize_approach(intent.approach or intent.action)
-    dc = resolution.determine_dc(gs, intent, proposed_dc)
-    log.info("_begin_check: pc=%s skill=%s dc=%s target=%s proposed_dc=%s",
-             pc.name, skill, dc, intent.target, proposed_dc)
+    dc = resolution.determine_dc(gs, intent, assessment)
+    log.info("_begin_check: pc=%s skill=%s dc=%s target=%s base=%s env=%s",
+             pc.name, skill, dc, intent.target,
+             assessment.base_dc if assessment else None,
+             assessment.env_modifier if assessment else None)
     label = f"{i18n.skill(skill)}檢定"
     if intent.target:
         label += f"：{i18n.text(intent.target)}"
@@ -613,7 +616,7 @@ async def _begin_check(channel, user, gs, pc, intent, proposed_dc) -> None:
 
     async def on_roll(interaction: discord.Interaction):
         log.info("_begin_check.on_roll: pc=%s helpers=%s rolling check", pc.name, view.helpers)
-        result = resolution.resolve(gs, intent, proposed_dc=proposed_dc, helpers=list(view.helpers))
+        result = resolution.resolve(gs, intent, assessment=assessment, helpers=list(view.helpers))
         await interaction.response.edit_message(content="🎲 擲骰中...", embed=None, view=None)
         await _send_dice_animation(channel, result.natural)
         prose = await _narrate_into_log(gs, result)

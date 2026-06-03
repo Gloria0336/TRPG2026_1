@@ -217,8 +217,19 @@ with the player's apparent goal (e.g. action="enter", target="the mine") so the 
 can suggest legitimate approaches.
 
 Set `is_attack` true ONLY if the player is trying to physically attack/fight someone.
-Only set `suggested_dc` (one of 5/10/15/20/25/30/35) for unusual actions not covered \
-by the scene; otherwise leave it null and let the program decide.
+
+DIFFICULTY (only for off-table actions the scene table doesn't already price):
+- `difficulty_band` rates how hard the player's chosen METHOD is — using the right \
+tool/skill is low, brute-forcing or an ill-suited method is high:
+  very_easy(用對方法幾乎必成) / easy / normal / hard / extreme / legendary(蠻幹/外行硬上).
+  Example: 用開鎖技巧開鎖 → very_easy~easy; 用腳踹開門 → hard~extreme.
+- `env_modifier` is a -4..+4 offset for how hard the SCENE/TARGET itself is — favourable \
+conditions go negative, hostile conditions go positive. Example: 普通木門 → about -3; \
+監牢大門 → about +4. Put a short reason in `env_reason`.
+- The final DC = band base + env_modifier, computed by the program. Do NOT fold tools, \
+allies, or spent resources into either value — the program applies those to the player's \
+roll, not the DC. Leave `difficulty_band` null (and env_modifier 0) for on-table actions \
+the scene already covers, or when no roll is needed.
 Write all player-facing `question`, `candidates`, and `options` in Traditional Chinese.
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):

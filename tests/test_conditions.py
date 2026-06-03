@@ -2,11 +2,17 @@
 gates. These prove the fix for the trace.log bug where a hypnotized NPC still
 prompted威嚇/魅惑 options and rolled an Intimidation check."""
 from app.ai import prompts
+from app.ai.schemas import DCAssessment
 from app.db import store
 from app.engine import conditions, resolution
 from app.engine.conditions import CheckOutcome
 from app.engine.types import Intent, IntentTier, ResultBand
 from app.state import game_state
+
+
+def _dc(n: int) -> DCAssessment:
+    """Force a specific final DC in tests (base/env decomposition is irrelevant here)."""
+    return DCAssessment(base_dc=n, env_modifier=0, final_dc=n)
 
 
 # ───────────────────────── catalog / gate ─────────────────────────
@@ -148,7 +154,7 @@ def test_successful_hypnotize_attaches_condition():
         action="催眠", approach="arcana", target="兜帽客",
     )
     # Force success deterministically by giving a tiny DC.
-    result = resolution.resolve(gs, intent, proposed_dc=5)
+    result = resolution.resolve(gs, intent, assessment=_dc(5))
     assert result.success is True
     assert conditions.HYPNOTIZED in store.get_conditions("ent_hooded")
 
@@ -161,7 +167,7 @@ def test_failed_spell_does_not_attach_condition():
     )
     # Massive DC guarantees FAILURE (auto-success on nat 20 still beats it but
     # the seeded RNG is deterministic — see conftest).
-    result = resolution.resolve(gs, intent, proposed_dc=35)
+    result = resolution.resolve(gs, intent, assessment=_dc(35))
     if result.band is ResultBand.FAILURE:
         assert conditions.HYPNOTIZED not in store.get_conditions("ent_hooded")
 
@@ -188,7 +194,7 @@ def test_blessed_actor_adds_d4_to_breakdown():
         actor_id="pc_lyra", raw_text="說服佩林", tier=IntentTier.A,
         action="persuade", approach="persuasion", target="老佩林",
     )
-    result = resolution.resolve(gs, intent, proposed_dc=10)
+    result = resolution.resolve(gs, intent, assessment=_dc(10))
     # The bless die is folded into external_bonus; the deltas line records its
     # source so the embed/log can show why the modifier landed where it did.
     bless_delta = next((d for d in result.deltas if "外部加值" in d), "")
@@ -242,7 +248,7 @@ def test_under_duress_downgrades_success_to_partial():
         actor_id="pc_lyra", raw_text="詢問兜帽客", tier=IntentTier.A,
         action="persuade", approach="persuasion", target="兜帽客",
     )
-    result = resolution.resolve(gs, intent, proposed_dc=5)
+    result = resolution.resolve(gs, intent, assessment=_dc(5))
     # DC 5 + Lyra's CHA = guaranteed SUCCESS → but under_duress drops it to PARTIAL.
     assert result.band is ResultBand.PARTIAL
     assert any("被脅迫" in d for d in result.deltas)

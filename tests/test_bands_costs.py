@@ -187,9 +187,9 @@ def test_game_state_snapshot_preserves_cost_pool():
     assert gs2.scene.cost_pool == gs.scene.cost_pool
 
 
-# ───────────────────────── DC anchor ladder extension ─────────────────────────
-def test_dc_anchors_include_legendary_35():
-    """§4.3 七級錨點：5/10/15/20/25/30/35。"""
-    assert 35 in rules_5e.DC_ANCHORS
-    assert rules_5e.nearest_anchor(34) == 35
-    assert rules_5e.nearest_anchor(40) == 35
+# ───────────────────────── DC ladder ─────────────────────────
+def test_dc_ladder_is_six_tier():
+    """§4.3 六級階梯：5/10/15/20/25/30（移除舊有 35）。"""
+    assert rules_5e.DC_ANCHORS == [5, 10, 15, 20, 25, 30]
+    assert 35 not in rules_5e.DC_ANCHORS
+    assert rules_5e.nearest_anchor(40) == 30

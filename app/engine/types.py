@@ -354,6 +354,12 @@ class ResolutionResult:
     # than collapsing to a generic verb.
     topic: str | None = None
     dc: int | None = None
+    # DC breakdown for auditing (design §4.3 — final DC = base band + env modifier).
+    # `dc` is the final value; these record why it landed there. None for non-check or
+    # scene-fixed-DC results.
+    dc_base: int | None = None
+    dc_env_modifier: int | None = None
+    dc_env_reason: str | None = None
     roll_breakdown: str | None = None  # human-readable dice breakdown for the embed
     natural: int | None = None
     crit: bool = False

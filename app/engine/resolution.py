@@ -4,7 +4,7 @@ This is the out-of-combat path (skill/ability checks and narrative beats). Comba
 actions are routed through combat.py. Either way the engine owns every number;
 the AI only supplies the Intent slots beforehand and the prose afterwards.
 
-Design refs: §4.5 (DC ownership: scene table first, AI proposal snapped to anchors),
+Design refs: §4.5 (DC ownership: scene fixed DC first, else AI base-band + env modifier),
 §4.6 (pipeline → structured result → event_log), §8.3 (intent already structured).
 """
 from __future__ import annotations
@@ -27,6 +27,7 @@ from .types import (
 from ..logging_setup import get_logger
 
 if TYPE_CHECKING:
+    from ..ai.schemas import DCAssessment
     from ..state.game_state import GameState
 
 log = get_logger("resolution")
@@ -302,9 +303,10 @@ def pick_cost(state: "GameState", skill: str, band: ResultBand, *, fumble: bool 
     return Cost(type=cost_type, severity=severity, persistent=False, note=note)
 
 
-def determine_dc(state: "GameState", intent: Intent, proposed_dc: int | None) -> int:
-    """DC ownership (§4.5): scene challenge table first, then AI proposal (snapped to
-    a 5e anchor), then a default medium DC."""
+def determine_dc(state: "GameState", intent: Intent, assessment: "DCAssessment | None") -> int:
+    """DC ownership (§4.5): scene challenge table first (GM fixed DC), then the AI's
+    base-band + env-modifier assessment (final DC, NOT anchor-snapped), then a default
+    standard DC."""
     challenges = state.scene.challenges or {}
     skill = normalize_approach(intent.approach)
     for key in (skill, intent.approach, intent.action):
@@ -312,12 +314,13 @@ def determine_dc(state: "GameState", intent: Intent, proposed_dc: int | None) ->
             dc = int(challenges[str(key).lower()])
             log.debug("determine_dc: matched scene challenge key=%s → DC %d", key, dc)
             return dc
-    if proposed_dc is not None:
-        dc = rules_5e.nearest_anchor(int(proposed_dc))
-        log.debug("determine_dc: snapped AI-proposed %s → DC %d", proposed_dc, dc)
-        return dc
-    log.debug("determine_dc: defaulting to DC 12 (no scene match, no AI proposal)")
-    return 12
+    if assessment is not None:
+        log.debug("determine_dc: AI assessment base=%d env=%+d → DC %d",
+                  assessment.base_dc, assessment.env_modifier, assessment.final_dc)
+        return assessment.final_dc
+    log.debug("determine_dc: defaulting to DC %d (no scene match, no AI assessment)",
+              rules_5e.BAND_DC["normal"])
+    return rules_5e.BAND_DC["normal"]
 
 
 def _compose_external(
@@ -451,11 +454,23 @@ def _build_short_circuit_result(
     return result
 
 
+def _attach_dc_audit(
+    result: ResolutionResult, assessment: "DCAssessment | None", dc: int
+) -> None:
+    """Record the base/env breakdown on the result when the AI assessment was the
+    effective DC source. Skipped when a scene fixed DC overrode it (GM-set DCs have no
+    base+env decomposition); `result.dc` still carries the final value either way."""
+    if assessment is not None and dc == assessment.final_dc:
+        result.dc_base = assessment.base_dc
+        result.dc_env_modifier = assessment.env_modifier
+        result.dc_env_reason = assessment.env_reason
+
+
 def resolve(
     state: "GameState",
     intent: Intent,
     *,
-    proposed_dc: int | None = None,
+    assessment: "DCAssessment | None" = None,
     helpers: list[str] | None = None,
     env_tier: int = 0,
     tool_bonus: int = 0,
@@ -463,8 +478,10 @@ def resolve(
 ) -> ResolutionResult:
     """Resolve an out-of-combat Tier-A intent into a ResolutionResult and log it.
 
-    `helpers`, `env_tier`, `tool_bonus`, `resource_spend` plug into §4.9 external
-    bonuses. The engine combines and caps them; AI never picks any of these numbers.
+    `assessment` is the AI's DC breakdown (base band + env modifier); the engine owns
+    the final DC via determine_dc (scene fixed DC still wins). `helpers`, `env_tier`,
+    `tool_bonus`, `resource_spend` plug into §4.9 external bonuses on the ROLL side —
+    never the DC. The engine combines and caps them; AI never picks any of these numbers.
     """
     actor = state.characters.get(intent.actor_id)
     if actor is None:
@@ -472,7 +489,7 @@ def resolve(
         raise KeyError(f"Unknown actor: {intent.actor_id}")
 
     skill = normalize_approach(intent.approach or intent.action)
-    dc = determine_dc(state, intent, proposed_dc)
+    dc = determine_dc(state, intent, assessment)
     advantage, disadvantage = state.scene.advantage_for(skill)
 
     # Pre-roll condition gate (target charmed/hypnotized/dead/already_resolved …).
@@ -503,6 +520,7 @@ def resolve(
         log.info("resolve: condition gate short-circuit outcome=%s triggering=%s",
                  gate.outcome.value, ",".join(gate.triggering))
         result = _build_short_circuit_result(actor, intent, skill, dc, gate)
+        _attach_dc_audit(result, assessment, dc)
         state.log_result(result)
         return result
 
@@ -515,6 +533,7 @@ def resolve(
                          triggering=actor_effect.triggering,
                          note=actor_effect.note),
         )
+        _attach_dc_audit(result, assessment, dc)
         state.log_result(result)
         return result
 
@@ -541,6 +560,7 @@ def resolve(
         disadvantage=disadvantage,
         external_bonus=external_bonus,
     )
+    _attach_dc_audit(result, assessment, dc)
     if intent.target:
         result.target_name = intent.target
     # Pass the player's original utterance through so the narrator sees who they

@@ -21,7 +21,7 @@ from ..engine.types import Character, Intent, IntentTier, ResolutionResult, Resu
 from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
 from . import guard, prompts
-from .schemas import EntityExtraction, IntentParse, NarrationQuestEnvelope, QuestDetails, QuestSeed
+from .schemas import DCAssessment, EntityExtraction, IntentParse, NarrationQuestEnvelope, QuestDetails, QuestSeed
 
 log = get_logger("ai")
 
@@ -168,8 +168,8 @@ async def interpret(
     text: str,
     *,
     clarification: list[dict] | None = None,
-) -> tuple[Intent, int | None]:
-    """Parse a player's message into a structured Intent (+ optional proposed DC).
+) -> tuple[Intent, DCAssessment | None]:
+    """Parse a player's message into a structured Intent (+ optional DC assessment).
 
     `clarification` is the open follow-up history for this actor (the prior GM
     questions + the player's replies). The parser sees it and is expected to
@@ -196,13 +196,14 @@ async def interpret(
             extracted = _extract_json(raw)
             log.debug("interpret: extracted JSON: %s", truncate(extracted, 1200))
             parsed = IntentParse.model_validate_json(extracted)
+            assessment = parsed.dc_assessment()
             log.info("interpret: AI parse OK tier=%s action=%s target=%s approach=%s is_attack=%s dc=%s",
                      parsed.tier, parsed.action, parsed.target, parsed.approach,
-                     parsed.is_attack, parsed.snapped_dc())
+                     parsed.is_attack, assessment.final_dc if assessment else None)
             intent = _to_intent(actor_id, text, parsed)
             _apply_check_gate(state, intent)
             log.debug("interpret: built Intent=%r", intent)
-            return intent, parsed.snapped_dc()
+            return intent, assessment
         except httpx.HTTPStatusError as exc:
             log.warning("interpret: AI HTTP %s — falling back to offline parse. body=%s",
                         exc.response.status_code, truncate(exc.response.text, 600))

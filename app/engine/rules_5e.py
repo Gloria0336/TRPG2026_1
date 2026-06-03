@@ -18,18 +18,38 @@ from .types import (
     SKILLS,
 )
 
-# DC anchors (design §4.3 — seven-tier ladder). 5e labels overlap the first six;
-# 35 (Legendary) is added so AI DC proposals can be snapped into the full design ladder.
+# Difficulty ladder (design §4.3 — six-tier). The ladder supplies the *base* DC for a
+# check: the intent parser judges how hard the player's chosen *method* is and picks one
+# band; the engine then adds an AI-judged environment modifier (see dc_from_band). The
+# final DC is intentionally NOT snapped back to these anchors — it may land anywhere.
 DC_LABELS: dict[int, str] = {
-    5: "Very Easy",
-    10: "Easy",
-    15: "Medium",
-    20: "Hard",
-    25: "Very Hard",
-    30: "Nearly Impossible",
-    35: "Legendary",
+    5: "極易",
+    10: "容易",
+    15: "標準",
+    20: "困難",
+    25: "極難",
+    30: "傳說",
 }
 DC_ANCHORS: list[int] = sorted(DC_LABELS)
+
+# Named difficulty bands → base DC. The intent parser picks a band for the action's
+# *method* (using the right tool/skill → low band; brute force → high band).
+BAND_DC: dict[str, int] = {
+    "very_easy": 5,
+    "easy": 10,
+    "normal": 15,
+    "hard": 20,
+    "extreme": 25,
+    "legendary": 30,
+}
+
+# Environment modifier (design: 場景目標難度). AI judges the current scene/target and
+# returns a signed offset in ±ENV_MODIFIER_CAP (favourable → negative, hostile → positive).
+ENV_MODIFIER_CAP: int = 4
+# Floor for any computed DC. A right-tool-on-an-easy-target combo can drop below 5
+# (e.g. base 5 − 3 = DC 2 ≈ "almost certainly succeeds"); MIN_DC just stops it going
+# nonsensical (≤0 would auto-pass even a nat-1 fumble before mods).
+MIN_DC: int = 1
 
 
 # Three-band margin thresholds (design §4.4).
@@ -99,8 +119,25 @@ def classify_band(total: int, dc: int, *, nat: int | None = None) -> ResultBand:
 
 
 def nearest_anchor(dc: int) -> int:
-    """Snap an arbitrary DC to the nearest 5e anchor (used to constrain AI DC proposals)."""
+    """Snap an arbitrary DC to the nearest ladder anchor. Retained as a utility; the DC
+    flow no longer snaps final DCs (design: 最終 DC = base + 環境修正, 不吸附)."""
     return min(DC_ANCHORS, key=lambda a: abs(a - dc))
+
+
+def dc_from_band(band: str, env_modifier: int = 0) -> tuple[int, int, int]:
+    """Compose a final DC from a difficulty band plus an environment modifier (§4.3).
+
+    `band` selects the base DC (action-method difficulty). `env_modifier` is the
+    scene/target difficulty offset, clamped to ±ENV_MODIFIER_CAP. The final DC is
+    floored at MIN_DC and deliberately NOT snapped to an anchor.
+
+    Returns (final_dc, base_dc, env_modifier_clamped) so callers can store the full
+    breakdown for auditing/debugging.
+    """
+    base = BAND_DC.get(band, BAND_DC["normal"])
+    env = max(-ENV_MODIFIER_CAP, min(ENV_MODIFIER_CAP, int(env_modifier)))
+    final = max(MIN_DC, base + env)
+    return final, base, env
 
 
 # ───────────────────────── Ability / skill checks ─────────────────────────
