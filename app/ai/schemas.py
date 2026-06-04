@@ -16,14 +16,15 @@ from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES
 from ..engine import conditions as cond
 from ..engine import rules_5e
 
-# Difficulty bands the parser may pick for the action's *method* (design §4.3).
-DIFFICULTY_BANDS = ["very_easy", "easy", "normal", "hard", "extreme", "legendary"]
+# Difficulty bands the parser may pick for the action's *method* (design §4.3 — four-tier,
+# normal = standard DC 10).
+DIFFICULTY_BANDS = ["easy", "normal", "hard", "extreme"]
 
-# 5e skills the parser may pick as an `approach`.
+# PF2e skills the parser may pick as an `approach`.
 ALLOWED_SKILLS = [
-    "acrobatics", "animal_handling", "arcana", "athletics", "deception", "history",
-    "insight", "intimidation", "investigation", "medicine", "nature", "perception",
-    "performance", "persuasion", "religion", "sleight_of_hand", "stealth", "survival",
+    "acrobatics", "arcana", "athletics", "crafting", "deception", "diplomacy",
+    "intimidation", "medicine", "nature", "occultism", "perception", "performance",
+    "religion", "society", "stealth", "survival", "thievery",
 ]
 
 
@@ -47,7 +48,7 @@ class IntentParse(BaseModel):
     tier: Literal["A", "B", "C"]
     action: str | None = None
     target: str | None = None
-    approach: str | None = None              # a 5e skill name when known
+    approach: str | None = None              # a PF2e skill name when known
     # The specific subject of the action — what is being asked about, examined, or
     # talked into. Optional; only set when the player named one. Lets the narrator
     # render "asks about her underwear color" instead of just "asks a question".
@@ -66,7 +67,7 @@ class IntentParse(BaseModel):
     # needed; the engine then uses its default. Tools/allies/resources are NEVER folded in
     # here — those are applied to the player's roll by the engine (§4.9).
     difficulty_band: Literal[
-        "very_easy", "easy", "normal", "hard", "extreme", "legendary"
+        "easy", "normal", "hard", "extreme"
     ] | None = None
     env_modifier: int = 0                    # scene/target offset, clamped to ±ENV_MODIFIER_CAP
     env_reason: str | None = None            # short audit note for the env_modifier
@@ -322,14 +323,14 @@ INTENT_JSON_SHAPE = (
     '  "tier": "A" | "B" | "C",\n'
     '  "action": short verb like "persuade" | "search" | "attack" | null,\n'
     '  "target": who/what is targeted, or null,\n'
-    '  "approach": one 5e skill from the allowed list, or null,\n'
+    '  "approach": one PF2e skill from the allowed list, or null,\n'
     '  "topic": the specific subject of the action when the player named one (e.g. "內褲顏色", "商隊去向", "他的名字"), or null,\n'
     '  "is_attack": true if the player is trying to attack/fight, else false,\n'
     '  "needs_check": false ONLY for a trivial, uncontested, no-risk action; else true,\n'
     '  "candidates": [2-4 concrete method options]   // tier B only,\n'
     '  "question": one short clarifying question | null  // tier C only,\n'
     '  "options": [2-4 option labels]                 // tier C only,\n'
-    '  "difficulty_band": "very_easy|easy|normal|hard|extreme|legendary" | null,  // how hard the player\'s chosen METHOD is; null for on-table/no-roll\n'
+    '  "difficulty_band": "easy|normal|hard|extreme" | null,  // how hard the player\'s chosen METHOD is (normal=標準 DC10); null for on-table/no-roll\n'
     '  "env_modifier": integer in -4..+4,             // scene/target difficulty: favourable→negative, hostile→positive\n'
     '  "env_reason": short reason for env_modifier | null,\n'
     '  "implausible": true if the message relies on gear the actor lacks or a fact not in the scene, else false\n'

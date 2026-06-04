@@ -58,9 +58,9 @@ POISONED = "poisoned"                        # disadv on attack & check
 EXHAUSTED = "exhausted"                      # leveled (1-6); meta carries level
 RAGING = "raging"                            # STR check adv (barbarian)
 
-# D class — NPC dialog flags (read mostly by intent prompt & narration; some downgrade
-# the SUCCESS band into PARTIAL via post-roll modifiers)
-UNDER_DURESS = "under_duress"                # forced to talk; SUCCESS → PARTIAL
+# D class — NPC dialog flags (read mostly by intent prompt & narration; some drop the
+# check one degree of success via post-roll modifiers)
+UNDER_DURESS = "under_duress"                # forced to talk; drops one degree (SUCCESS → FAILURE)
 LYING = "lying"                              # insight DC -3 against this target
 LOYAL_TO = "loyal_to"                        # parametric — see loyal_to() helper
 INDEBTED_TO = "indebted_to"                  # parametric — see indebted_to() helper
@@ -91,7 +91,7 @@ def parse_parametric(condition_id: str) -> tuple[str, str | None]:
     return condition_id, None
 
 # Categories of approach the gates care about.
-SOCIAL_SKILLS = frozenset({"persuasion", "deception", "intimidation", "insight", "performance"})
+SOCIAL_SKILLS = frozenset({"diplomacy", "deception", "intimidation", "perception", "performance"})
 ATTACK_LIKE = frozenset({"attack", "melee", "ranged"})
 
 
@@ -120,8 +120,9 @@ class ConditionEffect:
     # +1d4 / -1d4 sized modifier rolled inline. Engine reads this and rolls one
     # extra die per active source (caps at one for now — bless/guidance don't stack).
     actor_bonus_dice: int = 0   # signed: +4 for bless/guidance, -4 for bane
-    # If True a SUCCESS on this actor's check is downgraded one band (SUCCESS→PARTIAL).
-    # Used by UNDER_DURESS so a coerced NPC's PARTIAL is reflected in the prose cost.
+    # If True this bearer's check is dropped one degree of success (PF2e), e.g.
+    # CRIT_SUCCESS→SUCCESS, SUCCESS→FAILURE. Used by UNDER_DURESS so a coerced NPC's
+    # success no longer comes clean (a cost then attaches once it lands on a failure band).
     band_downgrade: bool = False
     incapacitated: bool = False
     requires_level: bool = False
@@ -135,7 +136,7 @@ CATALOG: dict[str, ConditionEffect] = {
         label_zh="魅惑",
         description_zh="對來源的社交檢定自動成功；不可被該來源敵對攻擊或威嚇。",
         outcomes={
-            "persuasion": CheckOutcome.AUTO_SUCCESS,
+            "diplomacy": CheckOutcome.AUTO_SUCCESS,
             "deception": CheckOutcome.AUTO_SUCCESS,
             "intimidation": CheckOutcome.AUTO_FAIL,
         },
@@ -283,7 +284,7 @@ CATALOG: dict[str, ConditionEffect] = {
     LYING: ConditionEffect(
         label_zh="說謊",
         description_zh="正在說謊；對該目標的洞察檢定有優勢。",
-        advantage_against={"insight": "advantage"},
+        advantage_against={"perception": "advantage"},
     ),
     LOYAL_TO: ConditionEffect(
         label_zh="效忠",
@@ -298,7 +299,7 @@ CATALOG: dict[str, ConditionEffect] = {
     NPC_DISTRACTED: ConditionEffect(
         label_zh="分心",
         description_zh="注意力被分散；對其潛行與巧手有優勢。",
-        advantage_against={"stealth": "advantage", "sleight_of_hand": "advantage"},
+        advantage_against={"stealth": "advantage", "thievery": "advantage"},
     ),
 }
 
@@ -407,7 +408,8 @@ class ActorEffect:
 
     `bonus_dice` is a signed d4-sized modifier (one die per active source, capped at
     one for the MVP); `advantage` / `disadvantage` cancel as in 5e; `band_downgrade`
-    bumps any SUCCESS down to PARTIAL; `outcome` short-circuits the roll entirely
+    drops the result one degree of success (e.g. SUCCESS→FAILURE); `outcome`
+    short-circuits the roll entirely
     (used by EXHAUSTED L6 = dead → AUTO_FAIL on anything).
     """
 

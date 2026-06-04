@@ -12,8 +12,9 @@ GREEN = discord.Color.green()
 RED = discord.Color.red()
 BLURPLE = discord.Color.blurple()
 GOLD = discord.Color.gold()
-# PARTIAL band sits between clean success (green) and outright failure (red).
-AMBER = discord.Color.orange()
+# Four-degree result colors (§4.4): CRIT_SUCCESS gold, SUCCESS green, FAILURE red,
+# CRIT_FAILURE dark red.
+DARK_RED = discord.Color.dark_red()
 
 
 def intro_embed() -> discord.Embed:
@@ -111,8 +112,10 @@ def roll_prompt_embed(
 
 
 def result_embed(result: ResolutionResult, narration: str | None = None) -> discord.Embed:
-    if result.band is ResultBand.PARTIAL:
-        color = AMBER
+    if result.band is ResultBand.CRIT_SUCCESS:
+        color = GOLD
+    elif result.band is ResultBand.CRIT_FAILURE:
+        color = DARK_RED
     elif result.success is True:
         color = GREEN
     elif result.success is False:
@@ -121,8 +124,14 @@ def result_embed(result: ResolutionResult, narration: str | None = None) -> disc
         color = BLURPLE
     e = discord.Embed(title=i18n.text(result.summary), color=color)
     if result.roll_breakdown:
+        # Degree tag for checks comes from the band; attacks (band is None) fall back to
+        # the nat-20/nat-1 crit/fumble flags.
         tag = ""
-        if result.crit:
+        if result.band is ResultBand.CRIT_SUCCESS:
+            tag = "  ⭐ **大成功！**"
+        elif result.band is ResultBand.CRIT_FAILURE:
+            tag = "  ⚠️ **大失敗！**"
+        elif result.crit:
             tag = "  ⭐ **重擊！**"
         elif result.fumble:
             tag = "  ⚠️ **大失敗！**"

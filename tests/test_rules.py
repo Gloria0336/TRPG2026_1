@@ -32,8 +32,8 @@ def test_skill_and_save_bonuses():
 def test_nearest_anchor():
     assert rules_5e.nearest_anchor(13) == 15
     assert rules_5e.nearest_anchor(11) == 10
-    # §4.3 six-tier ladder tops out at 30 (傳說/legendary) now.
-    assert rules_5e.nearest_anchor(99) == 30
+    # §4.3 four-tier ladder tops out at 20 (極難/extreme) now.
+    assert rules_5e.nearest_anchor(99) == 20
 
 
 def test_dc_from_band_base_table():
@@ -44,23 +44,23 @@ def test_dc_from_band_base_table():
 
 
 def test_dc_from_band_adds_env_modifier():
-    # base 5 (very_easy) − 3 (favourable env) = DC 2; can drop below the ladder floor.
-    assert rules_5e.dc_from_band("very_easy", -3) == (2, 5, -3)
-    # base 25 (extreme) + 4 (hostile env) = DC 29.
-    assert rules_5e.dc_from_band("extreme", 4) == (29, 25, 4)
+    # base 5 (easy) − 3 (favourable env) = DC 2; can drop below the ladder floor.
+    assert rules_5e.dc_from_band("easy", -3) == (2, 5, -3)
+    # base 20 (extreme) + 4 (hostile env) = DC 24.
+    assert rules_5e.dc_from_band("extreme", 4) == (24, 20, 4)
 
 
 def test_dc_from_band_clamps_env_and_floor():
     # env modifier is clamped to ±ENV_MODIFIER_CAP …
     final, base, env = rules_5e.dc_from_band("normal", 99)
-    assert env == rules_5e.ENV_MODIFIER_CAP and final == 15 + rules_5e.ENV_MODIFIER_CAP
+    assert env == rules_5e.ENV_MODIFIER_CAP and final == 10 + rules_5e.ENV_MODIFIER_CAP
     # … and the final DC never falls below MIN_DC.
-    final, base, env = rules_5e.dc_from_band("very_easy", -99)
+    final, base, env = rules_5e.dc_from_band("easy", -99)
     assert env == -rules_5e.ENV_MODIFIER_CAP and final == rules_5e.MIN_DC
 
 
 def test_unknown_band_falls_back_to_normal():
-    assert rules_5e.dc_from_band("bogus") == (15, 15, 0)
+    assert rules_5e.dc_from_band("bogus") == (10, 10, 0)
 
 
 def test_npc_modifier_table():

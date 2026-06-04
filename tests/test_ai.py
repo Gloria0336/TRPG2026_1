@@ -12,7 +12,7 @@ from app.ai import prompts
 from app.ai.schemas import IntentParse
 from app.config import settings
 from app.engine import rules_5e
-from app.engine.types import IntentTier, ResolutionResult, ResultKind
+from app.engine.types import IntentTier, ResolutionResult, ResultBand, ResultKind
 from app.discord_bot import i18n
 from app.content.monsters import spawn
 from app.content.characters import premade_pcs
@@ -42,7 +42,8 @@ async def test_offline_intent_attack():
 async def test_offline_intent_skill():
     gs = _fresh()
     intent, dc = await orchestrator.interpret(gs, "pc_lyra", "I try to persuade Old Perrin")
-    assert intent.approach == "persuasion"
+    # "persuade" normalizes to the PF2e skill diplomacy.
+    assert intent.approach == "diplomacy"
     assert intent.tier is IntentTier.A
 
 
@@ -67,7 +68,7 @@ async def test_narration_does_not_mutate_numbers():
     assert result.to_dict() == snapshot
 
 
-async def test_offline_narration_localizes_fumble_hint():
+async def test_offline_narration_localizes_crit_failure_hint():
     gs = _fresh()
     result = ResolutionResult(
         kind=ResultKind.CHECK,
@@ -75,14 +76,15 @@ async def test_offline_narration_localizes_fumble_hint():
         actor_name="Bram Ironwood",
         success=False,
         fumble=True,
-        summary="Perception check vs DC 15: FAILURE (fumble!)",
-        narration_hint="Describe an unlucky complication.",
+        band=ResultBand.CRIT_FAILURE,
+        summary="Perception check vs DC 15: CRIT FAILURE (fumble!)",
+        narration_hint="A disastrous fumble — the attempt fails badly and a heavy cost lands.",
     )
 
     prose = await orchestrator.narrate(gs, result)
 
-    assert "事情突然變糟" in prose
-    assert "Describe an unlucky complication" not in prose
+    assert "災難性的大失敗" in prose
+    assert "disastrous fumble" not in prose
 
 
 def test_i18n_does_not_replace_word_fragments():
@@ -120,12 +122,12 @@ def test_dc_assessment_composes_band_and_env():
     # band → base DC, env modifier added on top; final is NOT snapped to an anchor.
     p = IntentParse(tier="A", approach="athletics", difficulty_band="extreme", env_modifier=4)
     a = p.dc_assessment()
-    assert (a.base_dc, a.env_modifier, a.final_dc) == (25, 4, 29)
+    assert (a.base_dc, a.env_modifier, a.final_dc) == (20, 4, 24)
 
 
 def test_dc_assessment_clamps_env_modifier():
     # An out-of-range env modifier is clamped to ±ENV_MODIFIER_CAP by dc_from_band.
-    p = IntentParse(tier="A", approach="sleight_of_hand", difficulty_band="very_easy", env_modifier=-9)
+    p = IntentParse(tier="A", approach="thievery", difficulty_band="easy", env_modifier=-9)
     a = p.dc_assessment()
     assert a.env_modifier == -4 and a.final_dc == 1   # max(MIN_DC, 5 − 4)
 

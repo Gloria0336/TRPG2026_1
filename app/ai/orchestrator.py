@@ -395,7 +395,7 @@ def _quest_eligible(result: ResolutionResult) -> bool:
         return False
     text = " ".join(str(x or "") for x in (result.raw_text, result.topic, result.summary)).lower()
     socialish = (
-        "persuasion" in text or "insight" in text or "deception" in text
+        "diplomacy" in text or "perception" in text or "deception" in text
         or "intimidation" in text or "詢問" in text or "委託" in text
         or "任務" in text or "幫" in text or "協助" in text
     )
@@ -535,10 +535,12 @@ def _canned_narration(result: ResolutionResult) -> str:
 
 def _fallback_hint_text(hint: str) -> str:
     hints = {
-        "Describe a decisive, lucky break.": "出現了決定性的幸運轉機。",
-        "Describe an unlucky complication.": "事情突然變糟，出現了麻煩的意外。",
+        "A decisive, exceptional success — the goal is achieved and an extra boon lands; weave it in.":
+            "出現了決定性的大成功，目標達成之餘還帶來額外的增益。",
         "Describe a clean success.": "行動俐落成功，沒有額外波折。",
-        "Describe a setback; the attempt fails.": "嘗試失敗，局勢出現挫折。",
+        "Describe a setback; the attempt fails and a cost lands.": "嘗試失敗，局勢出現挫折，並付出了代價。",
+        "A disastrous fumble — the attempt fails badly and a heavy cost lands.":
+            "釀成災難性的大失敗，行動徹底搞砸，並付出沉重代價。",
         "Describe the moment vividly but briefly.": "場面短暫而鮮明地展開。",
         "A tactical maneuver.": "這是一個戰術動作。",
         "Land a solid, cinematic blow.": "攻擊紮實命中，場面俐落有力。",

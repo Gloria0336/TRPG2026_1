@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING
 from . import conditions, dice, rules_5e
 from .conditions import CheckOutcome, GateDecision
 from .types import (
+    Boon,
+    BoonMagnitude,
+    BoonType,
     Character,
     Cost,
     CostSeverity,
@@ -32,27 +35,31 @@ if TYPE_CHECKING:
 
 log = get_logger("resolution")
 
-# Map common free-text verbs to a governing 5e skill so the engine is robust even
-# when the AI hands us a loose `approach`.
+# Map common free-text verbs to a governing PF2e skill so the engine is robust even
+# when the AI hands us a loose `approach`. Legacy 5e skill words (persuasion, insight,
+# investigation, sleight_of_hand…) are kept as synonyms so old data and habits still map.
 APPROACH_SYNONYMS: dict[str, str] = {
-    "persuade": "persuasion", "convince": "persuasion", "talk": "persuasion", "negotiate": "persuasion",
+    "persuade": "diplomacy", "convince": "diplomacy", "talk": "diplomacy", "negotiate": "diplomacy",
+    "persuasion": "diplomacy", "command": "diplomacy", "request": "diplomacy",
     "intimidate": "intimidation", "threaten": "intimidation", "menace": "intimidation",
-    "deceive": "deception", "lie": "deception", "bluff": "deception", "trick": "deception",
+    "deceive": "deception", "lie": "deception", "bluff": "deception", "trick": "deception", "feint": "deception",
     "sneak": "stealth", "hide": "stealth", "skulk": "stealth",
     "climb": "athletics", "jump": "athletics", "swim": "athletics", "force": "athletics",
-    "break": "athletics", "shove": "athletics", "grapple": "athletics", "lift": "athletics",
-    "lockpick": "sleight_of_hand", "pick_lock": "sleight_of_hand", "pick": "sleight_of_hand",
-    "disarm": "sleight_of_hand", "pickpocket": "sleight_of_hand", "palm": "sleight_of_hand",
+    "break": "athletics", "shove": "athletics", "grapple": "athletics", "lift": "athletics", "trip": "athletics",
+    "lockpick": "thievery", "pick_lock": "thievery", "pick": "thievery", "disable": "thievery",
+    "disarm": "thievery", "pickpocket": "thievery", "palm": "thievery", "steal": "thievery",
+    "sleight_of_hand": "thievery", "sleight": "thievery",
     "tumble": "acrobatics", "balance": "acrobatics", "flip": "acrobatics",
-    "search": "investigation", "investigate": "investigation", "examine": "investigation",
-    "notice": "perception", "spot": "perception", "listen": "perception", "look": "perception", "scan": "perception",
-    "recall": "arcana", "identify": "arcana",
+    "search": "perception", "investigate": "perception", "examine": "perception", "seek": "perception",
+    "investigation": "perception", "notice": "perception", "spot": "perception", "listen": "perception",
+    "look": "perception", "scan": "perception", "read": "perception", "sense": "perception", "insight": "perception",
+    "recall": "arcana", "identify": "arcana", "occult": "occultism",
     "track": "survival", "forage": "survival", "navigate": "survival",
-    "heal": "medicine", "first_aid": "medicine", "diagnose": "medicine",
-    "read": "insight", "sense": "insight",
-    "command": "persuasion", "perform": "performance", "sing": "performance", "play": "performance",
-    "recall_lore": "history", "history": "history", "religion": "religion", "nature": "nature",
-    "tame": "animal_handling", "calm": "animal_handling",
+    "heal": "medicine", "first_aid": "medicine", "diagnose": "medicine", "treat": "medicine",
+    "perform": "performance", "sing": "performance", "play": "performance",
+    "recall_lore": "society", "history": "society", "society": "society", "religion": "religion", "nature": "nature",
+    "craft": "crafting", "repair": "crafting", "build": "crafting",
+    "tame": "nature", "calm": "nature", "animal_handling": "nature",
 }
 
 
@@ -60,7 +67,7 @@ APPROACH_SYNONYMS: dict[str, str] = {
 # casual ("I just calmly walk past the guard"), these always resolve against a DC so a
 # narrative claim can never become a free success (design §8.3 anti-talk protection).
 CONTESTED_SKILLS: frozenset[str] = frozenset({
-    "stealth", "deception", "persuasion", "intimidation", "sleight_of_hand",
+    "stealth", "deception", "diplomacy", "intimidation", "thievery",
 })
 
 
@@ -69,12 +76,12 @@ def _parametric_loyalty_decision(
 ) -> GateDecision | None:
     """Resolve LOYAL_TO:<ref> / INDEBTED_TO:<ref> against the current actor.
 
-    - loyal_to:<X> + persuasion/intimidation/deception → AUTO_FAIL unless ref==actor
-    - indebted_to:<actor> + persuasion → AUTO_SUCCESS
+    - loyal_to:<X> + diplomacy/intimidation/deception → AUTO_FAIL unless ref==actor
+    - indebted_to:<actor> + diplomacy → AUTO_SUCCESS
     Returns None when no parametric flag fires; the caller falls back to the
     standard catalog gate.
     """
-    if approach not in {"persuasion", "intimidation", "deception"}:
+    if approach not in {"diplomacy", "intimidation", "deception"}:
         return None
     for cid in conds:
         base, ref = conditions.parse_parametric(cid)
@@ -84,7 +91,7 @@ def _parametric_loyalty_decision(
                 triggering=(cid,),
                 note=f"{conditions.label(cid)}：對效忠對象不利的要求被拒絕",
             )
-        if base == conditions.INDEBTED_TO and ref == actor_id and approach == "persuasion":
+        if base == conditions.INDEBTED_TO and ref == actor_id and approach == "diplomacy":
             return GateDecision(
                 outcome=CheckOutcome.AUTO_SUCCESS,
                 triggering=(cid,),
@@ -163,7 +170,7 @@ def requires_check(state: "GameState", intent: Intent) -> bool:
 
 
 def normalize_approach(approach: str | None) -> str:
-    """Best-effort map an approach string to a 5e skill key."""
+    """Best-effort map an approach string to a PF2e skill key."""
     if not approach:
         return "improvise"
     a = approach.strip().lower().replace(" ", "_")
@@ -185,22 +192,21 @@ def normalize_approach(approach: str | None) -> str:
 _SKILL_DEFAULT_COST: dict[str, CostType] = {
     "stealth": CostType.EXPOSURE,
     "deception": CostType.EXPOSURE,
-    "sleight_of_hand": CostType.TRACE,
-    "persuasion": CostType.RELATION,
+    "thievery": CostType.TRACE,
+    "diplomacy": CostType.RELATION,
     "intimidation": CostType.RELATION,
     "performance": CostType.RELATION,
-    "insight": CostType.RELATION,
     "athletics": CostType.RESOURCE,
     "acrobatics": CostType.RESOURCE,
     "medicine": CostType.RESOURCE,
-    "investigation": CostType.TIME,
+    "crafting": CostType.RESOURCE,
     "perception": CostType.TIME,
     "survival": CostType.TIME,
     "arcana": CostType.TIME,
-    "history": CostType.TIME,
+    "occultism": CostType.TIME,
+    "society": CostType.TIME,
     "religion": CostType.TIME,
-    "nature": CostType.TIME,
-    "animal_handling": CostType.ATTENTION,
+    "nature": CostType.ATTENTION,
 }
 
 _DEFAULT_COST: CostType = CostType.TIME
@@ -216,7 +222,7 @@ _EFFECT_TO_CONDITION: dict[str, str] = {
     "魅惑": conditions.CHARMED,
     "支配": conditions.DOMINATED,
     "嚇": conditions.FRIGHTENED,
-    "威嚇": conditions.FRIGHTENED,   # PARTIAL/SUCCESS leaves target shaken
+    "威嚇": conditions.FRIGHTENED,   # SUCCESS leaves target shaken
     "束縛": conditions.RESTRAINED,
     "纏繞": conditions.RESTRAINED,
     "擒抱": conditions.GRAPPLED,
@@ -263,26 +269,25 @@ _SEVERITY_NOTE_ZH: dict[CostSeverity, str] = {
 }
 
 
-def _severity_for_band(band: ResultBand, *, fumble: bool) -> CostSeverity:
-    """Map band → cost severity (§4.4 + §4.7).
+def _severity_for_band(band: ResultBand) -> CostSeverity:
+    """Map a failure band → cost severity (§4.4 + §4.7).
 
-    PARTIAL leans light/moderate, FAILURE leans moderate/heavy. A nat-1 fumble
-    that ended in FAILURE bumps to heavy regardless.
+    The degree already encodes the nat-1 fumble (it shifts FAILURE → CRIT_FAILURE), so
+    severity keys purely off the band: FAILURE = moderate, CRIT_FAILURE = heavy.
     """
-    if band is ResultBand.FAILURE:
-        return CostSeverity.HEAVY if fumble else CostSeverity.MODERATE
-    if band is ResultBand.PARTIAL:
-        return CostSeverity.MODERATE if fumble else CostSeverity.LIGHT
-    return CostSeverity.LIGHT
+    if band is ResultBand.CRIT_FAILURE:
+        return CostSeverity.HEAVY
+    return CostSeverity.MODERATE
 
 
-def pick_cost(state: "GameState", skill: str, band: ResultBand, *, fumble: bool = False) -> Cost | None:
-    """Pick a structured Cost for a PARTIAL/FAILURE check (§4.7).
+def pick_cost(state: "GameState", skill: str, band: ResultBand) -> Cost | None:
+    """Pick a structured Cost for a FAILURE / CRIT_FAILURE check (§4.7).
 
     Selection order: scene.cost_pool (if any) → skill default → TIME. Sampling uses
-    the dice RNG so the same seed gives the same costs in tests.
+    the dice RNG so the same seed gives the same costs in tests. A CRIT_FAILURE cost is
+    heavier (HEAVY) and persists into durable state; an ordinary FAILURE does not.
     """
-    if band is ResultBand.SUCCESS:
+    if band not in (ResultBand.FAILURE, ResultBand.CRIT_FAILURE):
         return None
 
     pool = list(getattr(state.scene, "cost_pool", []) or [])
@@ -297,10 +302,79 @@ def pick_cost(state: "GameState", skill: str, band: ResultBand, *, fumble: bool 
     if cost_type is None:
         cost_type = _SKILL_DEFAULT_COST.get(skill, _DEFAULT_COST)
 
-    severity = _severity_for_band(band, fumble=fumble)
+    severity = _severity_for_band(band)
+    persistent = band is ResultBand.CRIT_FAILURE
     note = f"{_SEVERITY_NOTE_ZH[severity]}的{_COST_NOTE_ZH[cost_type]}"
-    log.info("pick_cost: skill=%s band=%s → type=%s severity=%s", skill, band.value, cost_type.value, severity.value)
-    return Cost(type=cost_type, severity=severity, persistent=False, note=note)
+    log.info("pick_cost: skill=%s band=%s → type=%s severity=%s persistent=%s",
+             skill, band.value, cost_type.value, severity.value, persistent)
+    return Cost(type=cost_type, severity=severity, persistent=persistent, note=note)
+
+
+# Default skill → BoonType fallback for a CRIT_SUCCESS when a scene has no boon_pool
+# (§4.4 大成功額外效果). Mirrors _SKILL_DEFAULT_COST — the upside that fits the fiction.
+_SKILL_DEFAULT_BOON: dict[str, BoonType] = {
+    "stealth": BoonType.OPENING,
+    "deception": BoonType.OPENING,
+    "thievery": BoonType.RESOURCE_GAIN,
+    "diplomacy": BoonType.GOODWILL,
+    "intimidation": BoonType.GOODWILL,
+    "performance": BoonType.GOODWILL,
+    "athletics": BoonType.OPENING,
+    "acrobatics": BoonType.OPENING,
+    "medicine": BoonType.PROGRESS,
+    "crafting": BoonType.PROGRESS,
+    "perception": BoonType.EXTRA_INFO,
+    "survival": BoonType.TIME_SAVED,
+    "arcana": BoonType.EXTRA_INFO,
+    "occultism": BoonType.EXTRA_INFO,
+    "society": BoonType.EXTRA_INFO,
+    "religion": BoonType.EXTRA_INFO,
+    "nature": BoonType.EXTRA_INFO,
+}
+
+_DEFAULT_BOON: BoonType = BoonType.OPENING
+
+_BOON_NOTE_ZH: dict[BoonType, str] = {
+    BoonType.TIME_SAVED: "省下時間",
+    BoonType.EXTRA_INFO: "額外情報",
+    BoonType.PROGRESS: "進度加成",
+    BoonType.RESOURCE_GAIN: "資源回收",
+    BoonType.GOODWILL: "關係改善",
+    BoonType.OPENING: "創造良機",
+}
+
+_BOON_MAGNITUDE_ZH: dict[BoonMagnitude, str] = {
+    BoonMagnitude.MINOR: "些許",
+    BoonMagnitude.MODERATE: "可觀",
+    BoonMagnitude.MAJOR: "顯著",
+}
+
+
+def pick_boon(state: "GameState", skill: str, band: ResultBand) -> Boon | None:
+    """Pick a structured Boon for a CRIT_SUCCESS check (§4.4 大成功額外效果).
+
+    The symmetric inverse of pick_cost. Selection order: scene.boon_pool (if any) →
+    skill default → OPENING. Sampling uses the shared dice RNG for repeatable tests.
+    A crit-success boon is MAJOR and flows into durable state.
+    """
+    if band is not ResultBand.CRIT_SUCCESS:
+        return None
+
+    pool = list(getattr(state.scene, "boon_pool", []) or [])
+    boon_type: BoonType | None = None
+    if pool:
+        try:
+            boon_type = BoonType(dice.choice(pool))
+        except ValueError:
+            log.warning("pick_boon: scene %s has invalid boon_pool entry; falling back", state.scene.id)
+            boon_type = None
+    if boon_type is None:
+        boon_type = _SKILL_DEFAULT_BOON.get(skill, _DEFAULT_BOON)
+
+    magnitude = BoonMagnitude.MAJOR
+    note = f"{_BOON_MAGNITUDE_ZH[magnitude]}的{_BOON_NOTE_ZH[boon_type]}"
+    log.info("pick_boon: skill=%s band=%s → type=%s magnitude=%s", skill, band.value, boon_type.value, magnitude.value)
+    return Boon(type=boon_type, magnitude=magnitude, persistent=True, note=note)
 
 
 def npc_dc_adjustment(state: "GameState", intent: Intent) -> tuple[int, str | None]:
@@ -413,11 +487,10 @@ def _condition_for(action: str | None, approach: str | None) -> str | None:
 def _apply_condition_effects(
     state: "GameState", intent: Intent, result: ResolutionResult,
 ) -> None:
-    """If the check produced SUCCESS/PARTIAL on an action that controls or
-    disables the target (catalog lookup), attach the matching condition to the
-    target entity. PARTIAL still applies — the goal was achieved — but FAILURE
-    does not."""
-    if result.band not in (ResultBand.SUCCESS, ResultBand.PARTIAL):
+    """If the check produced a success degree (CRIT_SUCCESS/SUCCESS) on an action that
+    controls or disables the target (catalog lookup), attach the matching condition to
+    the target entity. FAILURE / CRIT_FAILURE do not."""
+    if result.band not in (ResultBand.CRIT_SUCCESS, ResultBand.SUCCESS):
         return
     if not intent.target:
         return
@@ -501,6 +574,28 @@ def _attach_dc_audit(
         result.dc_base = assessment.base_dc
         result.dc_env_modifier = assessment.env_modifier
         result.dc_env_reason = assessment.env_reason
+
+
+def _apply_degree_drop(result: ResolutionResult, note: str, *, target_side: bool = False) -> None:
+    """Drop the result one degree of success (PF2e band_downgrade, e.g. under_duress).
+
+    Recomputes the back-compat `success` flag and rewrites the verdict word in the
+    summary via the canonical band labels (instead of a brittle literal replace). No-op
+    when already at the bottom of the ladder.
+    """
+    old = result.band
+    if old is None:
+        return
+    new = rules_5e.shift_band(old, -1)
+    if new is old:
+        return
+    result.band = new
+    result.success = rules_5e.success_for(new)
+    result.summary = result.summary.replace(
+        rules_5e._BAND_LABEL[old], rules_5e._BAND_LABEL[new], 1
+    )
+    prefix = "目標狀態降級" if target_side else "狀態降級"
+    result.deltas.append(f"{prefix}：{note}")
 
 
 def resolve(
@@ -612,35 +707,37 @@ def resolve(
     if external_parts:
         result.deltas.append("外部加值：" + "、".join(external_parts))
 
-    # Actor-side band downgrade (e.g. under_duress on the actor itself — rare for
-    # PCs, but the mechanism is symmetric). SUCCESS becomes PARTIAL so the prose
-    # carries a cost the player can feel.
-    if actor_effect.band_downgrade and result.band is ResultBand.SUCCESS:
-        result.band = ResultBand.PARTIAL
-        result.summary = result.summary.replace("SUCCESS", "PARTIAL")
-        result.deltas.append(f"狀態降級：{actor_effect.note}")
+    # Actor-side degree drop (e.g. under_duress on the actor itself — rare for PCs, but
+    # the mechanism is symmetric). Drops one degree of success (PF2e): CRIT_SUCCESS→SUCCESS,
+    # SUCCESS→FAILURE, so a coerced success no longer comes clean.
+    if actor_effect.band_downgrade and result.band in (ResultBand.CRIT_SUCCESS, ResultBand.SUCCESS):
+        _apply_degree_drop(result, actor_effect.note)
 
-    # Target-side D-flag: a coerced NPC who's the *target* of social pressure shouldn't
-    # give a clean SUCCESS either — the goal IS achieved but the cost lands.
-    if intent.target and result.band is ResultBand.SUCCESS:
+    # Target-side D-flag: a coerced NPC who's the *target* of social pressure also drops a
+    # degree, so the goal lands but not cleanly.
+    if intent.target and result.band in (ResultBand.CRIT_SUCCESS, ResultBand.SUCCESS):
         from ..db import store as _store
         _, target_conds = _store.get_conditions_by_ref(state.current_location_id, intent.target)
         for cid in target_conds:
             base, _ref = conditions.parse_parametric(cid)
             eff = conditions.CATALOG.get(base)
             if eff and eff.band_downgrade:
-                result.band = ResultBand.PARTIAL
-                result.summary = result.summary.replace("SUCCESS", "PARTIAL")
-                result.deltas.append(f"目標狀態降級：{eff.label_zh}")
+                _apply_degree_drop(result, eff.label_zh, target_side=True)
                 break
 
-    # Structured cost on PARTIAL/FAILURE (§4.7). Recorded into deltas so the dashboard
-    # log + future RAG/history layer can read it as plain text without re-parsing JSON.
-    if result.band and result.band is not ResultBand.SUCCESS:
-        cost = pick_cost(state, skill, result.band, fumble=result.fumble)
+    # Structured cost on FAILURE / CRIT_FAILURE, or a boon on CRIT_SUCCESS (§4.4/§4.7).
+    # Recorded into deltas so the dashboard log + future RAG/history layer can read it as
+    # plain text without re-parsing JSON.
+    if result.band in (ResultBand.FAILURE, ResultBand.CRIT_FAILURE):
+        cost = pick_cost(state, skill, result.band)
         if cost is not None:
             result.cost = cost
             result.deltas.append(f"代價：{cost.note}")
+    elif result.band is ResultBand.CRIT_SUCCESS:
+        boon = pick_boon(state, skill, result.band)
+        if boon is not None:
+            result.boon = boon
+            result.deltas.append(f"增益：{boon.note}")
 
     # Auto-attach conditions for spells/effects that control or disable a target
     # (e.g. 催眠術 SUCCESS → hypnotized on the target entity). Done before logging

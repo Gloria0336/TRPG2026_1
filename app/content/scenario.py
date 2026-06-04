@@ -140,7 +140,7 @@ LOCATIONS: list[dict] = [
      }},
 ]
 
-# Per-scene cost pools (design §4.7). When a check lands in PARTIAL or FAILURE the
+# Per-scene cost pools (design §4.7). When a check lands in FAILURE or CRIT_FAILURE the
 # engine picks a CostType from this list; severity is picked by band. Each entry is
 # the string value of a CostType enum; the engine cycles through them deterministically
 # (via the seeded RNG) so testing stays reproducible. Order is descriptive priority.
@@ -174,14 +174,13 @@ SCENES: list[dict] = [
             },
         ],
         "challenges": {
-            "persuasion": 11,
-            "insight": 10,
+            "diplomacy": 11,
             "perception": 13,
             "intimidation": 12,
         },
         "cost_pool": ["relation", "attention", "time"],
         "onboarding": [
-            "請老佩林喝一杯，問清楚商隊原本要去哪裡。（說服/洞悉）",
+            "請老佩林喝一杯，問清楚商隊原本要去哪裡。（交涉/察覺）",
             "掃視房間，看看有沒有人在偷聽。（察覺）",
             "接受委託。（推進故事）",
         ],
@@ -215,14 +214,13 @@ SCENES: list[dict] = [
             },
         ],
         "challenges": {
-            "investigation": 15,
-            "survival": 15,
             "perception": 15,
+            "survival": 15,
             "acrobatics": 15,
         },
         "cost_pool": ["time", "trace", "resource"],
         "onboarding": [
-            "搜索翻覆貨車，尋找線索。（調查）",
+            "搜索翻覆貨車，尋找線索。（察覺）",
             "尋找離開道路的足跡。（求生）",
             "檢查前方小徑是否有陷阱。（察覺）",
         ],
@@ -278,7 +276,7 @@ SCENES: list[dict] = [
             },
         ],
         "challenges": {
-            "persuasion": 15,
+            "diplomacy": 15,
             "intimidation": 15,
             "stealth": 15,
             "deception": 15,
@@ -286,7 +284,7 @@ SCENES: list[dict] = [
         "cost_pool": ["exposure", "attention", "relation"],
         "onboarding": [
             "戰鬥：衝向葛利克斯！（開始與首領和副手交戰）",
-            "談判：試著說服葛利克斯拿走金幣，放走護衛。（說服）",
+            "談判：試著說服葛利克斯拿走金幣，放走護衛。（交涉）",
             "潛行：溜進陰影中救出人質。（隱匿）",
         ],
         "encounter": [("goblin_boss", 1), ("goblin", 1)],

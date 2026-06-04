@@ -80,10 +80,13 @@ class Scene:
     advantage_skills: dict[str, str] = field(default_factory=dict)
     npcs: list[str] = field(default_factory=list)
     onboarding: list[str] = field(default_factory=list)
-    # Ordered list of CostType string values that PARTIAL/FAILURE checks may draw
+    # Ordered list of CostType string values that FAILURE/CRIT_FAILURE checks may draw
     # from in this scene (design §4.7). Empty list → engine falls back to a
     # skill-based default. See resolution.pick_cost.
     cost_pool: list[str] = field(default_factory=list)
+    # Ordered list of BoonType string values that a CRIT_SUCCESS may draw from in this
+    # scene (design §4.4 大成功額外效果). Empty → skill-based default. See resolution.pick_boon.
+    boon_pool: list[str] = field(default_factory=list)
 
     def advantage_for(self, skill: str) -> tuple[bool, bool]:
         tag = self.advantage_skills.get(skill, "")
@@ -100,6 +103,7 @@ class Scene:
             npcs=list(d.get("npcs", [])),
             onboarding=list(d.get("onboarding", [])),
             cost_pool=list(d.get("cost_pool", [])),
+            boon_pool=list(d.get("boon_pool", [])),
         )
 
     def to_dict(self) -> dict:
@@ -107,7 +111,7 @@ class Scene:
             "id": self.id, "title": self.title, "summary": self.summary,
             "challenges": self.challenges, "advantage_skills": self.advantage_skills,
             "npcs": self.npcs, "onboarding": self.onboarding,
-            "cost_pool": self.cost_pool,
+            "cost_pool": self.cost_pool, "boon_pool": self.boon_pool,
         }
 
     @classmethod
@@ -116,7 +120,7 @@ class Scene:
             id=d["id"], title=d["title"], summary=d["summary"],
             challenges=d.get("challenges", {}), advantage_skills=d.get("advantage_skills", {}),
             npcs=d.get("npcs", []), onboarding=d.get("onboarding", []),
-            cost_pool=d.get("cost_pool", []),
+            cost_pool=d.get("cost_pool", []), boon_pool=d.get("boon_pool", []),
         )
 
 

@@ -70,7 +70,7 @@ def _lyra() -> Character:
         hp=24,
         ac=16,
         speed=30,
-        skill_prof={"medicine": "prof", "insight": "prof", "persuasion": "prof", "religion": "prof"},
+        skill_prof={"medicine": "prof", "perception": "prof", "diplomacy": "prof", "religion": "prof"},
         save_prof=["WIS", "CHA"],
         portrait="光",
         blurb="心地溫暖的牧師，能扶起同伴，也能懲戒邪惡。",

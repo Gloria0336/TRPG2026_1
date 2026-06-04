@@ -29,7 +29,7 @@ def test_evaluate_gate_no_conditions_rolls():
 
 
 def test_hypnotized_target_auto_success_on_social():
-    d = conditions.evaluate_gate([conditions.HYPNOTIZED], approach="persuasion")
+    d = conditions.evaluate_gate([conditions.HYPNOTIZED], approach="diplomacy")
     assert d.outcome is CheckOutcome.AUTO_SUCCESS
     assert conditions.HYPNOTIZED in d.triggering
 
@@ -42,7 +42,7 @@ def test_hypnotized_target_intimidation_also_short_circuits():
 
 
 def test_charmed_blocks_intimidation_but_auto_passes_persuasion():
-    d_persuade = conditions.evaluate_gate([conditions.CHARMED], approach="persuasion")
+    d_persuade = conditions.evaluate_gate([conditions.CHARMED], approach="diplomacy")
     d_threaten = conditions.evaluate_gate([conditions.CHARMED], approach="intimidation")
     assert d_persuade.outcome is CheckOutcome.AUTO_SUCCESS
     assert d_threaten.outcome is CheckOutcome.AUTO_FAIL
@@ -240,17 +240,18 @@ def test_exhausted_l1_is_just_noted():
 
 
 # ───────────────────────── D class (NPC dialog) ─────────────────────────
-def test_under_duress_downgrades_success_to_partial():
+def test_under_duress_drops_success_one_degree():
     gs = game_state.reset_state(channel_id=1)
     store.add_condition("ent_hooded", conditions.UNDER_DURESS)
 
     intent = Intent(
         actor_id="pc_lyra", raw_text="詢問兜帽客", tier=IntentTier.A,
-        action="persuade", approach="persuasion", target="兜帽客",
+        action="persuade", approach="diplomacy", target="兜帽客",
     )
     result = resolution.resolve(gs, intent, assessment=_dc(5))
-    # DC 5 + Lyra's CHA = guaranteed SUCCESS → but under_duress drops it to PARTIAL.
-    assert result.band is ResultBand.PARTIAL
+    # DC 5 + Lyra's CHA → a success degree, but under_duress drops it one degree
+    # (CRIT_SUCCESS→SUCCESS or SUCCESS→FAILURE) — never a clean crit-success.
+    assert result.band in (ResultBand.SUCCESS, ResultBand.FAILURE)
     assert any("被脅迫" in d for d in result.deltas)
 
 
@@ -281,7 +282,8 @@ def test_indebted_to_actor_auto_succeeds():
 
 
 def test_lying_target_grants_insight_advantage():
-    d = conditions.evaluate_gate([conditions.LYING], approach="insight")
+    # PF2e Sense Motive is a Perception action — Lying grants advantage on perception.
+    d = conditions.evaluate_gate([conditions.LYING], approach="perception")
     assert d.advantage is True
 
 

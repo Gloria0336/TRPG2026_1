@@ -22,26 +22,29 @@ class Ability(str, Enum):
     CHA = "CHA"
 
 
-# 5e skill → governing ability.
+# PF2e skill → governing (key) ability (design §4.2). Perception is kept here too so the
+# engine can compute its bonus uniformly, though in PF2e it is a separate proficiency.
+# Note vs 5e: Nature/Religion are WIS-keyed; Diplomacy replaces Persuasion, Thievery
+# replaces Sleight of Hand, Society absorbs History/Recall Knowledge; Investigation and
+# Insight fold into Perception (Seek / Sense Motive), Animal Handling into Nature.
 SKILLS: dict[str, Ability] = {
     "acrobatics": Ability.DEX,
-    "animal_handling": Ability.WIS,
     "arcana": Ability.INT,
     "athletics": Ability.STR,
+    "crafting": Ability.INT,
     "deception": Ability.CHA,
-    "history": Ability.INT,
-    "insight": Ability.WIS,
+    "diplomacy": Ability.CHA,
     "intimidation": Ability.CHA,
-    "investigation": Ability.INT,
     "medicine": Ability.WIS,
-    "nature": Ability.INT,
+    "nature": Ability.WIS,
+    "occultism": Ability.INT,
     "perception": Ability.WIS,
     "performance": Ability.CHA,
-    "persuasion": Ability.CHA,
-    "religion": Ability.INT,
-    "sleight_of_hand": Ability.DEX,
+    "religion": Ability.WIS,
+    "society": Ability.INT,
     "stealth": Ability.DEX,
     "survival": Ability.WIS,
+    "thievery": Ability.DEX,
 }
 
 
@@ -270,18 +273,28 @@ class ResultKind(str, Enum):
 
 
 class ResultBand(str, Enum):
-    """Three-band outcome for ability checks (design §4.4).
+    """Four-degree outcome for ability checks (design §4.4 — PF2e symmetric ±10).
 
-    Margin vs DC slices the outcome instead of a pure pass/fail:
-    - SUCCESS: total ≥ DC (and not downgraded by a nat 1)
-    - PARTIAL: failed by 1-4 — the goal IS achieved, but a structured cost attaches
-    - FAILURE: failed by 5+
-    Nat 20 shifts the band up one step, nat 1 shifts it down (capped at the ends).
+    Margin vs DC slices the outcome into four degrees of success:
+    - CRIT_SUCCESS: total ≥ DC + 10 — a decisive success; a structured boon attaches
+    - SUCCESS:      total ≥ DC
+    - FAILURE:      total < DC — the attempt fails; a structured cost attaches
+    - CRIT_FAILURE: total ≤ DC - 10 — a disastrous failure; a heavier cost attaches
+    Nat 20 shifts the degree up one step, nat 1 shifts it down (capped at the ends).
     """
 
+    CRIT_SUCCESS = "crit_success"
     SUCCESS = "success"
-    PARTIAL = "partial"
     FAILURE = "failure"
+    CRIT_FAILURE = "crit_failure"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "ResultBand | None":
+        # Back-compat: legacy snapshots/event_logs stored the old three-band model.
+        # "partial" counted as success-with-cost, so fold it onto SUCCESS on load.
+        if value == "partial":
+            return cls.SUCCESS
+        return None
 
 
 class CostType(str, Enum):
@@ -306,7 +319,7 @@ class CostSeverity(str, Enum):
 
 @dataclass
 class Cost:
-    """A single structured cost attached to a PARTIAL or FAILURE result (design §4.7).
+    """A single structured cost attached to a FAILURE or CRIT_FAILURE result (design §4.7).
 
     `persistent` marks costs that should flow into durable state (flags, hp, resources)
     rather than living only in the narration. Out-of-combat MVP scope keeps most costs
@@ -336,6 +349,57 @@ class Cost:
         )
 
 
+class BoonType(str, Enum):
+    """Structured benefit categories (design §4.4 大成功額外效果). The symmetric inverse
+    of CostType: a CRIT_SUCCESS attaches one of these, picked by the engine from the
+    scene's boon pool or a skill-based fallback. The narrator dramatizes it but never
+    invents which type applied."""
+
+    TIME_SAVED = "time_saved"        # 省時
+    EXTRA_INFO = "extra_info"        # 額外情報
+    PROGRESS = "progress"            # 進度加成
+    RESOURCE_GAIN = "resource_gain"  # 資源回收
+    GOODWILL = "goodwill"            # 關係改善
+    OPENING = "opening"              # 創造良機
+
+
+class BoonMagnitude(str, Enum):
+    MINOR = "minor"
+    MODERATE = "moderate"
+    MAJOR = "major"
+
+
+@dataclass
+class Boon:
+    """A single structured benefit attached to a CRIT_SUCCESS result (design §4.4).
+
+    Mirrors `Cost`: `persistent` marks boons that should flow into durable state
+    (flags, resources, progress) rather than living only in the narration.
+    """
+
+    type: BoonType
+    magnitude: BoonMagnitude
+    persistent: bool = False
+    note: str = ""   # short program-generated tag; narrator elaborates, never overrides
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "magnitude": self.magnitude.value,
+            "persistent": self.persistent,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Boon":
+        return cls(
+            type=BoonType(d["type"]),
+            magnitude=BoonMagnitude(d["magnitude"]),
+            persistent=bool(d.get("persistent", False)),
+            note=str(d.get("note", "")),
+        )
+
+
 @dataclass
 class ResolutionResult:
     """Structured outcome computed entirely by the engine. The AI turns this into
@@ -345,11 +409,12 @@ class ResolutionResult:
     actor_id: str
     actor_name: str
     summary: str                       # terse mechanical summary, e.g. "Athletics check vs DC 15: SUCCESS"
-    # `success` is the boolean back-compat view: PARTIAL counts as success-with-cost
-    # (design §4.4: 部分成功＝成功，但附枚舉代價). FAILURE → False, NARRATIVE → None.
+    # `success` is the boolean back-compat view: a success degree (CRIT_SUCCESS/SUCCESS)
+    # → True. FAILURE / CRIT_FAILURE → False, NARRATIVE → None.
     success: bool | None = None
-    band: ResultBand | None = None    # three-band outcome for CHECK results (§4.4)
-    cost: Cost | None = None          # attached when band is PARTIAL or FAILURE (§4.7)
+    band: ResultBand | None = None    # four-degree outcome for CHECK results (§4.4)
+    cost: Cost | None = None          # attached when band is FAILURE or CRIT_FAILURE (§4.7)
+    boon: Boon | None = None          # attached when band is CRIT_SUCCESS (§4.4 大成功額外效果)
     target_id: str | None = None
     target_name: str | None = None
     # The specific subject of the action — copied through from Intent.topic so
@@ -386,6 +451,7 @@ class ResolutionResult:
         d["kind"] = self.kind.value
         d["band"] = self.band.value if self.band else None
         d["cost"] = self.cost.to_dict() if self.cost else None
+        d["boon"] = self.boon.to_dict() if self.boon else None
         return d
 
 

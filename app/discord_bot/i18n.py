@@ -26,26 +26,33 @@ ABILITY_ZH = {
 }
 
 SKILL_ZH = {
+    # PF2e skills (design §4.2)
     "acrobatics": "特技",
-    "animal handling": "馴獸",
-    "animal_handling": "馴獸",
     "arcana": "奧秘",
     "athletics": "運動",
+    "crafting": "製作",
     "deception": "欺瞞",
-    "history": "歷史",
-    "insight": "洞悉",
+    "diplomacy": "交涉",
     "intimidation": "威嚇",
-    "investigation": "調查",
-    "medicine": "醫藥",
+    "medicine": "醫療",
     "nature": "自然",
+    "occultism": "神秘學",
     "perception": "察覺",
     "performance": "表演",
-    "persuasion": "說服",
     "religion": "宗教",
-    "sleight of hand": "巧手",
-    "sleight_of_hand": "巧手",
+    "society": "社會",
     "stealth": "隱匿",
     "survival": "求生",
+    "thievery": "盜竊",
+    # Legacy 5e aliases — keep so old event_log/snapshot text still renders.
+    "animal handling": "馴獸",
+    "animal_handling": "馴獸",
+    "history": "歷史",
+    "insight": "洞悉",
+    "investigation": "調查",
+    "persuasion": "說服",
+    "sleight of hand": "巧手",
+    "sleight_of_hand": "巧手",
 }
 
 ACTION_ZH = {
@@ -140,8 +147,9 @@ def text(value: str | None) -> str:
         "Talk to someone": "找人交談",
         "Examine something": "仔細檢查某樣東西",
         "Move on": "繼續前進",
+        "CRIT SUCCESS": "大成功",
+        "CRIT FAILURE": "大失敗",
         "SUCCESS": "成功",
-        "PARTIAL": "部分成功",
         "FAILURE": "失敗",
         "HIT": "命中",
         "MISS": "未命中",

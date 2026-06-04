@@ -53,24 +53,31 @@ const CONDITION_ZH = {
 };
 
 const SKILL_ZH = {
+  // PF2e skills
   Acrobatics: "特技",
-  "Animal Handling": "馴獸",
   Arcana: "奧秘",
   Athletics: "運動",
+  Crafting: "製作",
   Deception: "欺瞞",
-  History: "歷史",
-  Insight: "洞悉",
+  Diplomacy: "交涉",
   Intimidation: "威嚇",
-  Investigation: "調查",
-  Medicine: "醫藥",
+  Medicine: "醫療",
   Nature: "自然",
+  Occultism: "神秘學",
   Perception: "察覺",
   Performance: "表演",
-  Persuasion: "說服",
   Religion: "宗教",
-  "Sleight Of Hand": "巧手",
+  Society: "社會",
   Stealth: "隱匿",
   Survival: "求生",
+  Thievery: "盜竊",
+  // Legacy 5e aliases — keep so old log text still renders.
+  "Animal Handling": "馴獸",
+  History: "歷史",
+  Insight: "洞悉",
+  Investigation: "調查",
+  Persuasion: "說服",
+  "Sleight Of Hand": "巧手",
 };
 
 const ACTION_ZH = {
@@ -115,6 +122,8 @@ function translateText(text) {
     .replaceAll("victory", "勝利")
     .replaceAll("defeat", "敗北")
     .replaceAll("ended", "已結束")
+    .replaceAll("CRIT SUCCESS", "大成功")
+    .replaceAll("CRIT FAILURE", "大失敗")
     .replaceAll("SUCCESS", "成功")
     .replaceAll("FAILURE", "失敗")
     .replaceAll("HIT", "命中")

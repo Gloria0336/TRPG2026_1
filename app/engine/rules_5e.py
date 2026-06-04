@@ -18,29 +18,26 @@ from .types import (
     SKILLS,
 )
 
-# Difficulty ladder (design §4.3 — six-tier). The ladder supplies the *base* DC for a
-# check: the intent parser judges how hard the player's chosen *method* is and picks one
-# band; the engine then adds an AI-judged environment modifier (see dc_from_band). The
-# final DC is intentionally NOT snapped back to these anchors — it may land anywhere.
+# Difficulty ladder (design §4.3 — four-tier, standard = DC 10). The ladder supplies the
+# *base* DC for a check: the intent parser judges how hard the player's chosen *method* is
+# and picks one band; the engine then adds an AI-judged environment modifier (see
+# dc_from_band). The final DC is intentionally NOT snapped back to these anchors.
 DC_LABELS: dict[int, str] = {
-    5: "極易",
-    10: "容易",
-    15: "標準",
-    20: "困難",
-    25: "極難",
-    30: "傳說",
+    5: "容易",
+    10: "標準",
+    15: "困難",
+    20: "極難",
 }
 DC_ANCHORS: list[int] = sorted(DC_LABELS)
 
 # Named difficulty bands → base DC. The intent parser picks a band for the action's
-# *method* (using the right tool/skill → low band; brute force → high band).
+# *method* (using the right tool/skill → low band; brute force → high band). `normal` is
+# the standard/中間 difficulty, deliberately anchored at DC 10.
 BAND_DC: dict[str, int] = {
-    "very_easy": 5,
-    "easy": 10,
-    "normal": 15,
-    "hard": 20,
-    "extreme": 25,
-    "legendary": 30,
+    "easy": 5,
+    "normal": 10,
+    "hard": 15,
+    "extreme": 20,
 }
 
 # Environment modifier (design: 場景目標難度). AI judges the current scene/target and
@@ -71,11 +68,13 @@ def npc_modifier(disposition: str | None) -> int:
 MIN_DC: int = 1
 
 
-# Three-band margin thresholds (design §4.4).
-# - SUCCESS:  total ≥ DC
-# - PARTIAL:  short by 1..PARTIAL_MARGIN  (achieves goal, attaches a structured cost)
-# - FAILURE:  short by more than that
-PARTIAL_MARGIN: int = 4
+# Four-degree margin threshold (design §4.4 — symmetric ±10, PF2e degrees of success).
+# - CRIT_SUCCESS: total ≥ DC + CRIT_MARGIN
+# - SUCCESS:      total ≥ DC
+# - FAILURE:      total < DC
+# - CRIT_FAILURE: total ≤ DC - CRIT_MARGIN
+# A natural 20 shifts the degree up one step, a natural 1 down one step.
+CRIT_MARGIN: int = 10
 
 # Helper & external-bonus caps (design §4.9). Per-helper schedule is diminishing so
 # extras quickly stop counting; everything together is bounded by EXTERNAL_BONUS_CAP
@@ -93,7 +92,7 @@ def assist_bonus(helpers: list[Character], skill: str) -> int:
     Proficient helpers contribute in order: ASSIST_BONUSES[0], [1], 0, 0, …
     Total is then floored at ASSIST_CAP. Non-proficient helpers contribute nothing
     (design: 外行幫不上忙) — so a bard who can't pick locks doesn't add to a stealth
-    or sleight_of_hand check via "I help".
+    or thievery check via "I help".
     """
     if skill not in SKILLS:
         # Raw ability or unknown approach: proficiency check doesn't apply, so we
@@ -111,29 +110,42 @@ def cap_external(raw: int) -> int:
     return max(-EXTERNAL_BONUS_CAP, min(EXTERNAL_BONUS_CAP, raw))
 
 
-def _shift_band(band: ResultBand, steps: int) -> ResultBand:
-    """Shift a band along the SUCCESS↔PARTIAL↔FAILURE ladder; capped at the ends."""
-    ladder = [ResultBand.FAILURE, ResultBand.PARTIAL, ResultBand.SUCCESS]
-    i = ladder.index(band)
-    i = max(0, min(len(ladder) - 1, i + steps))
-    return ladder[i]
+# Degree-of-success ladder, lowest → highest. Public so resolution can apply a one-degree
+# downgrade (band_downgrade conditions) through the same single source of truth.
+_BAND_LADDER: list[ResultBand] = [
+    ResultBand.CRIT_FAILURE,
+    ResultBand.FAILURE,
+    ResultBand.SUCCESS,
+    ResultBand.CRIT_SUCCESS,
+]
+
+
+def shift_band(band: ResultBand, steps: int) -> ResultBand:
+    """Shift a band along the four-degree ladder; capped at the ends (§4.4)."""
+    i = _BAND_LADDER.index(band)
+    i = max(0, min(len(_BAND_LADDER) - 1, i + steps))
+    return _BAND_LADDER[i]
 
 
 def classify_band(total: int, dc: int, *, nat: int | None = None) -> ResultBand:
     """Map (total, DC) plus an optional natural d20 to a ResultBand.
 
-    Pure function, no dice. Nat 20 / nat 1 shift the band one notch (§4.4).
+    Pure function, no dice. Symmetric ±CRIT_MARGIN four-degree (§4.4):
+    crit success at ≥ DC+10, crit failure at ≤ DC-10. Nat 20 / nat 1 then shift the
+    degree one notch up / down.
     """
-    if total >= dc:
+    if total >= dc + CRIT_MARGIN:
+        band = ResultBand.CRIT_SUCCESS
+    elif total >= dc:
         band = ResultBand.SUCCESS
-    elif dc - total <= PARTIAL_MARGIN:
-        band = ResultBand.PARTIAL
+    elif total <= dc - CRIT_MARGIN:
+        band = ResultBand.CRIT_FAILURE
     else:
         band = ResultBand.FAILURE
     if nat == 20:
-        band = _shift_band(band, +1)
+        band = shift_band(band, +1)
     elif nat == 1:
-        band = _shift_band(band, -1)
+        band = shift_band(band, -1)
     return band
 
 
@@ -174,16 +186,28 @@ def check_bonus(actor: Character, key: str) -> tuple[int, str]:
 
 
 _BAND_LABEL: dict[ResultBand, str] = {
+    ResultBand.CRIT_SUCCESS: "CRIT SUCCESS",
     ResultBand.SUCCESS: "SUCCESS",
-    ResultBand.PARTIAL: "PARTIAL",
     ResultBand.FAILURE: "FAILURE",
+    ResultBand.CRIT_FAILURE: "CRIT FAILURE",
 }
 
 _BAND_HINT: dict[ResultBand, str] = {
+    ResultBand.CRIT_SUCCESS: "A decisive, exceptional success — the goal is achieved and an extra boon lands; weave it in.",
     ResultBand.SUCCESS: "Describe a clean success.",
-    ResultBand.PARTIAL: "The goal is achieved, but a cost lands — weave the cost into the moment.",
-    ResultBand.FAILURE: "Describe a setback; the attempt fails.",
+    ResultBand.FAILURE: "Describe a setback; the attempt fails and a cost lands.",
+    ResultBand.CRIT_FAILURE: "A disastrous fumble — the attempt fails badly and a heavy cost lands.",
 }
+
+
+def band_verdict(band: ResultBand) -> str:
+    """Mechanical verdict word for a band, used in result summaries."""
+    return _BAND_LABEL[band]
+
+
+def success_for(band: ResultBand) -> bool:
+    """The back-compat boolean view: a success degree (crit-success or success)."""
+    return band in (ResultBand.CRIT_SUCCESS, ResultBand.SUCCESS)
 
 
 def ability_check(
@@ -195,11 +219,12 @@ def ability_check(
     disadvantage: bool = False,
     external_bonus: int = 0,
 ) -> ResolutionResult:
-    """Resolve a skill/ability check vs a DC using the three-band scheme (§4.4).
+    """Resolve a skill/ability check vs a DC using the four-degree scheme (§4.4).
 
-    Returns a ResolutionResult with both `band` (SUCCESS/PARTIAL/FAILURE) and the
-    back-compat `success` boolean: PARTIAL counts as success-with-cost (design §4.4
-    部分成功＝成功，但附枚舉代價). Costs are attached upstream in resolution.resolve.
+    Returns a ResolutionResult with both `band` (CRIT_SUCCESS/SUCCESS/FAILURE/CRIT_FAILURE)
+    and the back-compat `success` boolean: a success degree (crit-success or success) →
+    True. Structured cost (FAILURE/CRIT_FAILURE) and boon (CRIT_SUCCESS) are attached
+    upstream in resolution.resolve.
 
     `external_bonus` (design §4.9) folds assist + environment + tool + resource into
     a single signed offset; callers are expected to have already capped it via
@@ -209,7 +234,7 @@ def ability_check(
     bonus, label = check_bonus(actor, key)
     roll = dice.roll_d20(bonus + external_bonus, advantage=advantage, disadvantage=disadvantage)
     band = classify_band(roll.total, dc, nat=roll.natural)
-    success = band in (ResultBand.SUCCESS, ResultBand.PARTIAL)
+    success = success_for(band)
 
     breakdown = roll.breakdown()
     if external_bonus:
@@ -218,12 +243,7 @@ def ability_check(
 
     verdict = _BAND_LABEL[band]
     flavour = " (crit!)" if roll.is_crit else " (fumble!)" if roll.is_fumble else ""
-    if roll.is_crit and band is ResultBand.SUCCESS:
-        hint = "Describe a decisive, lucky break."
-    elif roll.is_fumble and band is ResultBand.FAILURE:
-        hint = "Describe an unlucky complication."
-    else:
-        hint = _BAND_HINT[band]
+    hint = _BAND_HINT[band]
     return ResolutionResult(
         kind=ResultKind.CHECK,
         actor_id=actor.id,
@@ -253,7 +273,7 @@ def opposed_check(
     """§4.10 對抗檢定: passive defender becomes a static DC = 10 + their mod on `defense`.
 
     Only the actor rolls — async-friendly (a stealth attempt vs an offline defender
-    still resolves). Goes through the same three-band/cost pipeline as ability_check.
+    still resolves). Goes through the same four-degree/cost pipeline as ability_check.
     `approach` is the actor's skill/ability; `defense` is the defender's resisting
     skill or ability (e.g. stealth vs perception, athletics vs athletics for grapple).
     """

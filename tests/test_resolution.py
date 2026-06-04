@@ -99,8 +99,8 @@ def test_requires_check_forces_roll_against_wary_target():
 
 def test_determine_dc_uses_scene_table():
     gs = _fresh()
-    intent = Intent(actor_id="pc_lyra", raw_text="persuade", tier=IntentTier.A, approach="persuasion")
-    assert resolution.determine_dc(gs, intent, None) == gs.scene.challenges["persuasion"]
+    intent = Intent(actor_id="pc_lyra", raw_text="persuade", tier=IntentTier.A, approach="diplomacy")
+    assert resolution.determine_dc(gs, intent, None) == gs.scene.challenges["diplomacy"]
 
 
 def test_determine_dc_from_assessment():
@@ -124,9 +124,9 @@ def test_determine_dc_can_drop_below_ladder_floor():
 
 def test_determine_dc_defaults_to_normal():
     gs = _fresh()
-    # acrobatics not in tavern table, no assessment → default normal=15.
+    # acrobatics not in tavern table, no assessment → default normal=10.
     intent = Intent(actor_id="pc_bram", raw_text="balance on a beam", tier=IntentTier.A, approach="acrobatics")
-    assert resolution.determine_dc(gs, intent, None) == 15
+    assert resolution.determine_dc(gs, intent, None) == 10
 
 
 def test_determine_dc_applies_npc_disposition_offset():
@@ -146,7 +146,7 @@ def test_determine_dc_npc_offset_only_for_social_skills():
     # stealth is not a social skill → no disposition offset even against a friendly NPC.
     intent = Intent(actor_id="pc_lyra", raw_text="溜過老佩林", tier=IntentTier.A,
                     approach="stealth", target="老佩林")
-    assert resolution.determine_dc(gs, intent, None) == 15  # default normal, unmodified
+    assert resolution.determine_dc(gs, intent, None) == 10  # default normal, unmodified
 
 
 def test_determine_dc_npc_offset_stacks_with_assessment_and_floors():
@@ -171,10 +171,13 @@ def test_resolve_records_npc_disposition_audit():
 
 
 def test_normalize_approach_synonyms():
-    assert resolution.normalize_approach("lockpick") == "sleight_of_hand"
-    assert resolution.normalize_approach("convince") == "persuasion"
+    assert resolution.normalize_approach("lockpick") == "thievery"
+    assert resolution.normalize_approach("convince") == "diplomacy"
     assert resolution.normalize_approach("stealth") == "stealth"
     assert resolution.normalize_approach("I try to sneak past") == "stealth"
+    # legacy 5e skill words still map for back-compat
+    assert resolution.normalize_approach("persuasion") == "diplomacy"
+    assert resolution.normalize_approach("sleight_of_hand") == "thievery"
 
 
 def test_snapshot_roundtrip():

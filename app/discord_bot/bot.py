@@ -1212,7 +1212,7 @@ async def _maybe_npc_initiated_combat(channel, gs) -> bool:
 async def _maybe_resolve_climax(channel, gs, result) -> None:
     if gs.scene.id != "warren" or gs.flags.get("over"):
         return
-    social = {"persuasion", "intimidation", "stealth", "deception"}
+    social = {"diplomacy", "intimidation", "stealth", "deception"}
     summ = result.summary.lower()
     if result.success and any(s in summ for s in social):
         gs.flags["climax_resolved"] = True

@@ -152,7 +152,7 @@ def _location_card_block(state: "GameState") -> str:
     return "\n".join(lines)
 
 
-LOCATION_CARD_SYSTEM = f"""You are a LOCATION REGISTRATION AGENT for a living-world D&D 5e engine.
+LOCATION_CARD_SYSTEM = f"""You are a LOCATION REGISTRATION AGENT for a living-world Pathfinder 2e engine.
 
 Your job is to turn a location registration request into stable structured world data.
 Write all player-facing fields in Traditional Chinese.
@@ -237,14 +237,14 @@ action for what the player wrote. The engine handles consequences via cost/band 
 narrator handles social fallout in prose — that is not your job.
 - Examples that LOOK weird but are tier A, not tier C:
   - "詢問兜帽客穿什麼顏色的內褲" → tier A, action="詢問", target="兜帽客", \
-approach="persuasion", topic="內褲顏色"
+approach="diplomacy", topic="內褲顏色"
   - "問守衛他穿不穿襪子" → tier A, action="詢問", target="守衛", topic="是否穿襪子"
   - "舔門把" → tier A, action="舔", target="門把", approach="perception" (taste-as-sensing)
   - "向牧師打聽他的私生活" → tier A, action="打聽", target="牧師", topic="私生活"
 - Only fall to tier C when the LITERAL text cannot resolve to a verb+target — "我做點事" \
 or "嗯..." or a one-word noun with no action.
 
-`approach` must be one of these 5e skills when applicable: {", ".join(ALLOWED_SKILLS)}.
+`approach` must be one of these PF2e skills when applicable: {", ".join(ALLOWED_SKILLS)}.
 
 For tier "A", also decide `needs_check`:
 - Set `needs_check` FALSE only for trivial, uncontested, no-risk actions where failure \
@@ -296,8 +296,8 @@ Set `is_attack` true ONLY if the player is trying to physically attack/fight som
 DIFFICULTY (set this whenever a roll is needed — you own the DC):
 - `difficulty_band` rates how hard the player's chosen METHOD is — using the right \
 tool/skill is low, brute-forcing or an ill-suited method is high:
-  very_easy(用對方法幾乎必成) / easy / normal / hard / extreme / legendary(蠻幹/外行硬上).
-  Example: 用開鎖技巧開鎖 → very_easy~easy; 用腳踹開門 → hard~extreme.
+  easy(用對方法/有利, DC5) / normal(標準, DC10) / hard(吃力或方法不佳, DC15) / extreme(蠻幹/外行硬上, DC20).
+  Example: 用開鎖工具開鎖 → easy; 用腳踹開門 → hard~extreme.
 - `env_modifier` is a -4..+4 offset for how hard the SCENE/TARGET itself is — favourable \
 conditions go negative, hostile conditions go positive. Example: 普通木門 → about -3; \
 監牢大門 → about +4. Put a short reason in `env_reason`.
@@ -428,22 +428,27 @@ def intent_context(
 
 
 # ───────────────────────── Narrator (GM voice) ─────────────────────────
-NARRATE_SYSTEM = """You are the GAME MASTER narrator for a Dungeons & Dragons 5e session. \
+NARRATE_SYSTEM = """You are the GAME MASTER narrator for a Pathfinder 2e session. \
 You will be given a STRUCTURED RESULT that the game engine has already computed (dice, \
-hits, damage, band, cost). Your job is to dramatize it in vivid, concise prose.
+hits, damage, band, cost, boon). Your job is to dramatize it in vivid, concise prose.
 
 ABSOLUTE RULES:
 - Write ONLY in Traditional Chinese.
-- Never contradict or change any number, hit/miss, success/failure, band, cost, or HP \
-in the result.
+- Never contradict or change any number, hit/miss, success/failure, band, cost, boon, or \
+HP in the result.
 - Never invent new mechanical outcomes (no extra damage, no new enemies dying, no loot \
 unless stated).
-- If the result has a `band` of PARTIAL: the action DID succeed — narrate the goal as \
-achieved, then weave the given cost (e.g. exposure / time / relation) into the same \
-moment as a complication. Do not flip it into a failure.
-- If a `cost` is provided, the TYPE and SEVERITY come from the engine — honour both. \
-You may colour the cost with sensory detail, but you may not switch its category or \
-add a different cost.
+- Honour the four-degree `band` exactly:
+  - CRIT_SUCCESS: a decisive, exceptional success — narrate the goal achieved and weave \
+in the given `boon` as an extra upside in the same moment.
+  - SUCCESS: a clean success.
+  - FAILURE: the attempt does NOT achieve its goal — narrate the setback and weave in \
+the given `cost`.
+  - CRIT_FAILURE: a disastrous failure — narrate it going badly wrong and weave in the \
+given (heavier) `cost`.
+- If a `cost` or `boon` is provided, its TYPE and SEVERITY/MAGNITUDE come from the engine \
+— honour them. You may colour it with sensory detail, but you may not switch its category \
+or add a different one.
 - Keep it to 1-3 sentences. Be evocative but tight. Address the table naturally.
 - Do not mention dice, DCs, or modifiers explicitly unless it adds flavor; describe the \
 fiction, not the math."""
@@ -546,11 +551,20 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
         parts.append(f"  topic (the specific subject — narrate it literally, do not soften): \"{result.topic}\"")
     parts.append(f"  mechanical summary: {result.summary}")
     if result.band:
-        parts.append(f"  band: {result.band.value} (SUCCESS=clean, PARTIAL=succeeded with cost, FAILURE=did not achieve)")
+        parts.append(
+            f"  band: {result.band.value} (CRIT_SUCCESS=exceptional success +extra boon, "
+            "SUCCESS=clean success, FAILURE=did not achieve +a cost, "
+            "CRIT_FAILURE=disastrous failure +a heavy cost)"
+        )
     if result.cost:
         parts.append(
             f"  cost: type={result.cost.type.value}, severity={result.cost.severity.value}"
             + (f" — {result.cost.note}" if result.cost.note else "")
+        )
+    if result.boon:
+        parts.append(
+            f"  boon: type={result.boon.type.value}, magnitude={result.boon.magnitude.value}"
+            + (f" — {result.boon.note}" if result.boon.note else "")
         )
     if result.roll_breakdown:
         parts.append(f"  roll: {result.roll_breakdown}")
@@ -568,7 +582,7 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
 
 # ───────────────────────── Narrator (no-roll beat) ─────────────────────────
 NARRATE_BEAT_SYSTEM = """You are the GAME MASTER narrating a brief, uncontested action \
-in a Dungeons & Dragons 5e session. There was NO dice roll — this action simply happens. \
+in a Pathfinder 2e session. There was NO dice roll — this action simply happens. \
 Describe the moment: what the actor does and its immediate, mundane result.
 
 ABSOLUTE RULES:
@@ -580,8 +594,8 @@ any new mechanical outcome.
 
 
 # ───────────────────────── Location opener ─────────────────────────
-NARRATE_QUEST_SYSTEM = f"""You are the GAME MASTER narrator for a Dungeons & Dragons \
-5e session, and you may also signal when an NPC is offering a quest.
+NARRATE_QUEST_SYSTEM = f"""You are the GAME MASTER narrator for a Pathfinder 2e \
+session, and you may also signal when an NPC is offering a quest.
 
 Return ONLY JSON. `prose` is the Traditional Chinese GM narration. `quest_offer` is null \
 unless an NPC is clearly issuing a task, commission, request for help, bounty, rescue, \
@@ -631,7 +645,7 @@ def quest_agent_context(state: "GameState", seed: dict) -> str:
     )
 
 
-SCENE_SYSTEM = """You are the GAME MASTER establishing a LOCATION in a D&D 5e one-shot. \
+SCENE_SYSTEM = """You are the GAME MASTER establishing a LOCATION in a Pathfinder 2e one-shot. \
 Paint the place in 2-4 atmospheric sentences based on the provided summary. Do not resolve \
 any actions or invent mechanics; just describe where the party finds themselves and invite \
 them to act. The party arrives at this location naturally as the story unfolds — frame it \
@@ -655,7 +669,7 @@ def scene_context(state: "GameState") -> str:
 
 # ───────────────────────── Scene recap (/scene) ─────────────────────────
 SCENE_RECAP_SYSTEM = """You are the GAME MASTER re-describing the situation AS IT CURRENTLY \
-STANDS in a D&D 5e session (the table asked to look around again). In 2-4 vivid sentences, \
+STANDS in a Pathfinder 2e session (the table asked to look around again). In 2-4 vivid sentences, \
 present tense, describe where the party is now, who and what is present, and the current \
 mood. Base it ONLY on the live state given (location, present/absent entities, persistent \
 changes, time of day, recent events). Do NOT resolve actions, roll dice, invent new \

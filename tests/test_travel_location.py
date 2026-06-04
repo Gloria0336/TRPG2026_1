@@ -97,7 +97,7 @@ def test_travel_to_authored_place_keeps_scene_content():
     from app.content import scenario
     gs.goto_scene(scenario.scene_by_id(loc["id"]))
     assert gs.current_location_id == "east_road"
-    assert "investigation" in gs.scene.challenges
+    assert "perception" in gs.scene.challenges
 
 
 # ── Step 3: prompts read as LOCATION-driven, not SCENE-driven ──
