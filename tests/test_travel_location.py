@@ -119,11 +119,12 @@ def test_intent_prompt_lists_known_exits():
     assert "EXITS" in ctx
     exit_section = ctx.split("EXITS")[1]
     exit_block = exit_section.split("Known location checks")[0]
-    # 2d adjacency: from the tavern you can reach its neighbours (東路, 晨橋村) but NOT the
-    # goblin warren directly — it is two hops away, past the east road.
-    assert "東路" in exit_block        # adjacent neighbour
+    # Hierarchical world graph: the tavern is a venue inside 晨橋村, so its only one-hop exit
+    # is the containing village. 東路 (a sibling of the village) is two hops away — you step
+    # out to the village first — and the goblin warren is further still.
     assert "晨橋村" in exit_block       # the containing village (parent)
-    assert "哥布林巢穴" not in exit_block  # no longer everywhere-reachable
+    assert "東路" not in exit_block     # two hops away, reached through the village
+    assert "哥布林巢穴" not in exit_block  # further still, never an immediate exit
     # The current location must NOT appear in EXITS — only places you can travel TO.
     assert "鎏金酒杯酒館" not in exit_block
 
@@ -144,16 +145,16 @@ def test_known_exits_excludes_current_location():
     gs = game_state.reset_state(channel_id=0)
     exits = prompts.known_exits(gs)
     ids = [e["id"] for e in exits]
-    assert "tavern" not in ids
-    assert "east_road" in ids
+    assert "tavern" not in ids       # the current venue is never an exit
+    assert "morningbridge" in ids    # its one-hop neighbour is the containing village
 
 
-def test_known_exits_follow_authored_adjacency():
-    """2d: from the tavern only adjacent places + the parent village are reachable; the
-    warren (two hops away) is not. From the east road the warren IS reachable."""
+def test_known_exits_follow_world_graph_adjacency():
+    """Hierarchical graph: from the tavern (a venue) the only one-hop exit is its parent
+    village. From the east road both its sibling village and the warren it connects to show."""
     gs = game_state.reset_state(channel_id=0)
     tavern_exits = {e["id"] for e in prompts.known_exits(gs)}
-    assert tavern_exits == {"morningbridge", "east_road"}
+    assert tavern_exits == {"morningbridge"}
 
     gs.goto_location("east_road", title="東路")
     road_exits = {e["id"] for e in prompts.known_exits(gs)}

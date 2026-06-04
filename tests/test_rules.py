@@ -63,6 +63,19 @@ def test_unknown_band_falls_back_to_normal():
     assert rules_5e.dc_from_band("bogus") == (15, 15, 0)
 
 
+def test_npc_modifier_table():
+    # Disposition → deterministic DC offset (設計：態度數值化).
+    assert rules_5e.npc_modifier("friendly") == -3
+    assert rules_5e.npc_modifier("afraid") == -1
+    assert rules_5e.npc_modifier("cowed") == -2
+    assert rules_5e.npc_modifier("neutral") == 0
+    assert rules_5e.npc_modifier("wary") == 1
+    assert rules_5e.npc_modifier("hostile") == 3
+    # Unknown / None → no offset.
+    assert rules_5e.npc_modifier(None) == 0
+    assert rules_5e.npc_modifier("bogus") == 0
+
+
 def test_apply_damage_downs_pc():
     bram, _ = premade_pcs()
     deltas = rules_5e.apply_damage(bram, bram.max_hp)

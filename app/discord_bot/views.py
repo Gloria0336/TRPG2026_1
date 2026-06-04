@@ -11,8 +11,22 @@ from typing import Awaitable, Callable
 
 import discord
 
+from ..config import settings
+
 OnRoll = Callable[[discord.Interaction], Awaitable[None]]
 OnChoice = Callable[[discord.Interaction, str], Awaitable[None]]
+
+
+def _is_allowed_channel_id(channel_id: int | None) -> bool:
+    allowed = settings.parsed_discord_allowed_channel_ids
+    return not allowed or (channel_id in allowed)
+
+
+async def _reject_disallowed_channel(interaction: discord.Interaction) -> None:
+    allowed = sorted(settings.parsed_discord_allowed_channel_ids)
+    channel_list = "、".join(f"<#{channel_id}>" for channel_id in allowed)
+    msg = f"這個 bot 只能在指定頻道使用：{channel_list}" if channel_list else "這個 bot 目前沒有允許使用的 Discord 頻道。"
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 class RollView(discord.ui.View):
@@ -58,6 +72,12 @@ class RollView(discord.ui.View):
             self.add_item(self._assist_btn)
         else:
             self._assist_btn = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if _is_allowed_channel_id(interaction.channel_id):
+            return True
+        await _reject_disallowed_channel(interaction)
+        return False
 
     async def _on_roll_click(self, interaction: discord.Interaction):
         if interaction.user.id != self.allowed_user_id:
@@ -109,6 +129,12 @@ class ChoiceView(discord.ui.View):
             btn = discord.ui.Button(label=_truncate(label), style=discord.ButtonStyle.secondary, row=i // 5)
             btn.callback = self._make_cb(label)
             self.add_item(btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if _is_allowed_channel_id(interaction.channel_id):
+            return True
+        await _reject_disallowed_channel(interaction)
+        return False
 
     def _make_cb(self, label: str):
         async def _cb(interaction: discord.Interaction):

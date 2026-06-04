@@ -151,8 +151,8 @@ def requires_check(state: "GameState", intent: Intent) -> bool:
         from ..db import store
         ent = store.find_by_ref(state.current_location_id, intent.target)
         if ent:
-            # A wary/afraid/hostile target always resists — roll regardless of skill.
-            if ent.get("disposition") in ("wary", "afraid", "hostile"):
+            # A wary/afraid/hostile/attack target always resists — roll regardless of skill.
+            if ent.get("disposition") in ("wary", "afraid", "hostile", "attack"):
                 return True
             # Engaging a PRESENT scene obstacle with a skill the author flagged here
             # (e.g. examining the tripwire, searching the wagons) → roll. Reading a
@@ -303,24 +303,53 @@ def pick_cost(state: "GameState", skill: str, band: ResultBand, *, fumble: bool 
     return Cost(type=cost_type, severity=severity, persistent=False, note=note)
 
 
+def npc_dc_adjustment(state: "GameState", intent: Intent) -> tuple[int, str | None]:
+    """Deterministic DC offset from the target NPC's disposition (design: 態度數值化).
+
+    Applies ONLY to social checks (`conditions.SOCIAL_SKILLS`) aimed at a present-or-known
+    entity that carries a disposition — friendlier targets are easier to sway, hostile ones
+    resist harder. Returns (offset, disposition); (0, None) when out of scope so callers can
+    add it unconditionally. The AI never picks this value; it is looked up from stored state.
+    """
+    skill = normalize_approach(intent.approach or intent.action)
+    if skill not in conditions.SOCIAL_SKILLS or not intent.target:
+        return 0, None
+    from ..db import store
+    ent = store.find_by_ref(state.current_location_id, intent.target)
+    if not ent:
+        return 0, None
+    disp = ent.get("disposition")
+    return rules_5e.npc_modifier(disp), disp
+
+
 def determine_dc(state: "GameState", intent: Intent, assessment: "DCAssessment | None") -> int:
-    """DC ownership (§4.5): scene challenge table first (GM fixed DC), then the AI's
-    base-band + env-modifier assessment (final DC, NOT anchor-snapped), then a default
-    standard DC."""
-    challenges = state.scene.challenges or {}
-    skill = normalize_approach(intent.approach)
-    for key in (skill, intent.approach, intent.action):
-        if key and str(key).lower() in challenges:
-            dc = int(challenges[str(key).lower()])
-            log.debug("determine_dc: matched scene challenge key=%s → DC %d", key, dc)
-            return dc
+    """DC ownership: the AI's base-band + env-modifier assessment owns the DC (final DC,
+    NOT anchor-snapped). The scene challenge table is only a *fallback* for when the AI
+    returned no assessment at all — it is no longer a priority override, and is no longer
+    fed to the parser as a reference. A default standard DC backstops both.
+
+    A deterministic NPC disposition offset (design: 態度數值化) is then folded in uniformly
+    across all three DC sources and the result re-floored at MIN_DC."""
     if assessment is not None:
-        log.debug("determine_dc: AI assessment base=%d env=%+d → DC %d",
-                  assessment.base_dc, assessment.env_modifier, assessment.final_dc)
-        return assessment.final_dc
-    log.debug("determine_dc: defaulting to DC %d (no scene match, no AI assessment)",
-              rules_5e.BAND_DC["normal"])
-    return rules_5e.BAND_DC["normal"]
+        base_dc = assessment.final_dc
+        source = "AI assessment"
+    else:
+        base_dc = None
+        challenges = state.scene.challenges or {}
+        skill = normalize_approach(intent.approach)
+        for key in (skill, intent.approach, intent.action):
+            if key and str(key).lower() in challenges:
+                base_dc = int(challenges[str(key).lower()])
+                source = f"scene challenge {key!r}"
+                break
+        if base_dc is None:
+            base_dc = rules_5e.BAND_DC["normal"]
+            source = "default normal"
+    npc_mod, disp = npc_dc_adjustment(state, intent)
+    final = max(rules_5e.MIN_DC, base_dc + npc_mod)
+    log.debug("determine_dc: %s base=%d npc=%+d (%s) → DC %d",
+              source, base_dc, npc_mod, disp or "—", final)
+    return final
 
 
 def _compose_external(
@@ -455,12 +484,20 @@ def _build_short_circuit_result(
 
 
 def _attach_dc_audit(
-    result: ResolutionResult, assessment: "DCAssessment | None", dc: int
+    result: ResolutionResult, assessment: "DCAssessment | None", dc: int,
+    state: "GameState", intent: Intent,
 ) -> None:
-    """Record the base/env breakdown on the result when the AI assessment was the
-    effective DC source. Skipped when a scene fixed DC overrode it (GM-set DCs have no
-    base+env decomposition); `result.dc` still carries the final value either way."""
-    if assessment is not None and dc == assessment.final_dc:
+    """Record the DC breakdown on the result. The deterministic NPC disposition offset
+    (design: 態度數值化) is always recorded when in scope. The AI base/env breakdown is
+    recorded when the AI assessment was the effective DC source — i.e. `dc` equals the
+    assessment's final DC plus the npc offset. Skipped when a scene fixed DC overrode it
+    (GM-set DCs have no base+env decomposition); `result.dc` carries the final value
+    either way."""
+    npc_mod, disp = npc_dc_adjustment(state, intent)
+    if disp is not None:
+        result.dc_npc_modifier = npc_mod
+        result.dc_npc_disposition = disp
+    if assessment is not None and dc == assessment.final_dc + npc_mod:
         result.dc_base = assessment.base_dc
         result.dc_env_modifier = assessment.env_modifier
         result.dc_env_reason = assessment.env_reason
@@ -520,7 +557,7 @@ def resolve(
         log.info("resolve: condition gate short-circuit outcome=%s triggering=%s",
                  gate.outcome.value, ",".join(gate.triggering))
         result = _build_short_circuit_result(actor, intent, skill, dc, gate)
-        _attach_dc_audit(result, assessment, dc)
+        _attach_dc_audit(result, assessment, dc, state, intent)
         state.log_result(result)
         return result
 
@@ -533,7 +570,7 @@ def resolve(
                          triggering=actor_effect.triggering,
                          note=actor_effect.note),
         )
-        _attach_dc_audit(result, assessment, dc)
+        _attach_dc_audit(result, assessment, dc, state, intent)
         state.log_result(result)
         return result
 
@@ -560,7 +597,7 @@ def resolve(
         disadvantage=disadvantage,
         external_bonus=external_bonus,
     )
-    _attach_dc_audit(result, assessment, dc)
+    _attach_dc_audit(result, assessment, dc, state, intent)
     if intent.target:
         result.target_name = intent.target
     # Pass the player's original utterance through so the narrator sees who they

@@ -98,10 +98,14 @@ def _action_line(a) -> str:
     return f"**{i18n.action(a.name)}**{uses}：{i18n.text(a.description)}"
 
 
-def roll_prompt_embed(actor: Character, label: str, dc: int | None) -> discord.Embed:
+def roll_prompt_embed(
+    actor: Character, label: str, dc: int | None, dc_note: str | None = None,
+) -> discord.Embed:
     desc = f"{i18n.character_label(actor)}：{i18n.text(label)}"
     if dc is not None:
         desc += f"\n目標：**DC {dc}**"
+        if dc_note:
+            desc += f"（{dc_note}）"
     desc += "\n\n點擊 🎲 擲骰。（伺服器會擲出真正結果；按鈕只負責公開結果。）"
     return discord.Embed(title="需要擲骰", description=desc, color=BLURPLE)
 

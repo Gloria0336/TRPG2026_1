@@ -21,7 +21,15 @@ from ..engine.types import Character, Intent, IntentTier, ResolutionResult, Resu
 from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
 from . import guard, prompts
-from .schemas import DCAssessment, EntityExtraction, IntentParse, NarrationQuestEnvelope, QuestDetails, QuestSeed
+from .schemas import (
+    DCAssessment,
+    EntityExtraction,
+    IntentParse,
+    LocationCard,
+    NarrationQuestEnvelope,
+    QuestDetails,
+    QuestSeed,
+)
 
 log = get_logger("ai")
 
@@ -327,7 +335,7 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
                 settings.model_narrate,
                 narrate_system,
                 base_user,
-                max_tokens=200,
+                max_tokens=500,
             )
             log.info("narrate: AI narration OK (%d chars)", len(prose))
             log.debug("narrate: prose=%s", truncate(prose, 500))
@@ -345,7 +353,7 @@ async def narrate(state: GameState, result: ResolutionResult) -> str:
                         settings.model_narrate,
                         narrate_system,
                         retry_user,
-                        max_tokens=200,
+                        max_tokens=500,
                     )
                     log.info("narrate: AI narration retry OK (%d chars)", len(retry))
                     log.debug("narrate: retry prose=%s", truncate(retry, 500))
@@ -408,7 +416,7 @@ async def narrate_with_quest(state: GameState, result: ResolutionResult) -> tupl
             prompts.NARRATE_QUEST_SYSTEM,
             base_user,
             json_mode=True,
-            max_tokens=650,
+            max_tokens=1200,
         )
         parsed = NarrationQuestEnvelope.model_validate_json(_extract_json(raw))
         prose = (parsed.prose or "").strip()
@@ -451,6 +459,70 @@ async def build_quest_details(state: GameState, seed: QuestSeed | dict) -> tuple
                         type(exc).__name__, exc)
     from ..db import store
     return store.fallback_quest_details(seed_data), "details_degraded"
+
+
+def _fallback_location_card(request: dict) -> LocationCard:
+    name = (
+        request.get("canonical_name")
+        or request.get("requested_name")
+        or "未命名地點"
+    )
+    aliases = [a for a in (request.get("aliases") or []) if isinstance(a, str) and a.strip()]
+    notes = (request.get("authored_notes") or "").strip()
+    if notes:
+        base_summary = notes
+    else:
+        base_summary = (
+            f"{name} 是隊伍剛確立的地點，輪廓仍帶著探索中的不確定感。"
+            "這裡的光線、氣味與可觸碰的地形會成為後續描述的固定錨點，"
+            "直到玩家行動揭露更多細節。"
+        )
+    return LocationCard(
+        canonical_name=name,
+        aliases=aliases,
+        base_summary=base_summary,
+        sensory_anchors=["潮濕空氣", "低回聲", "不穩定的光線"],
+        visual_landmarks=[f"{name}的入口", "可辨認的路徑邊界"],
+        interactive_features=["地面痕跡", "牆面或路旁可檢視的細節"],
+        discoverables=["此地與來路之間的關聯線索"],
+        hazards=["視線受阻或地勢不明帶來的風險"],
+        soft_hooks=["可以停下觀察、聆聽，或沿著最明顯的路徑前進"],
+        exits_hint=list(request.get("connects") or []),
+        mood="未知、緊繃、可探索",
+    )
+
+
+async def build_location_card(request: dict) -> tuple[LocationCard, str]:
+    """Run the location registration agent. Always returns a usable card."""
+    if _ai_enabled():
+        try:
+            raw = await _chat(
+                settings.model_narrate,
+                prompts.LOCATION_CARD_SYSTEM,
+                prompts.location_card_context(request),
+                json_mode=True,
+                max_tokens=1000,
+            )
+            card = LocationCard.model_validate_json(_extract_json(raw))
+            if not card.canonical_name:
+                card.canonical_name = request.get("canonical_name") or request.get("requested_name") or ""
+            if not card.base_summary:
+                card.base_summary = _fallback_location_card(request).base_summary
+            log.info(
+                "location_card: AI OK name=%s source=%s",
+                card.canonical_name,
+                request.get("source"),
+            )
+            return card, "ready"
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "location_card: failed (%s: %s) - using fallback",
+                type(exc).__name__,
+                exc,
+            )
+    else:
+        log.info("location_card: AI disabled, using fallback")
+    return _fallback_location_card(request), "fallback"
 
 
 def _canned_narration(result: ResolutionResult) -> str:
@@ -519,7 +591,7 @@ async def recap_scene(state: GameState) -> str:
         try:
             prose = await _chat(
                 settings.model_narrate, prompts.SCENE_RECAP_SYSTEM,
-                prompts.scene_recap_context(state), max_tokens=240,
+                prompts.scene_recap_context(state), max_tokens=600,
             )
             log.info("recap_scene: AI OK (%d chars)", len(prose))
             return prose
@@ -536,7 +608,7 @@ async def open_scene(state: GameState) -> str:
     if _ai_enabled():
         try:
             prose = await _chat(
-                settings.model_narrate, prompts.SCENE_SYSTEM, prompts.scene_context(state), max_tokens=220
+                settings.model_narrate, prompts.SCENE_SYSTEM, prompts.scene_context(state), max_tokens=800
             )
             log.info("open_scene: AI OK (%d chars)", len(prose))
             return prose

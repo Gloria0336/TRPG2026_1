@@ -6,6 +6,7 @@ import pytest
 from app.config import settings
 from app.db import store
 from app.engine import dice
+from app.state import campaigns
 
 
 @pytest.fixture(autouse=True)
@@ -16,8 +17,14 @@ def _seed_dice():
 
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path):
+    # Isolate both the DB file AND the per-campaign root, and clear the active-campaign
+    # pointer, so reset_state()/new_game() (which now open a per-campaign DB) never touch
+    # the real save/ dir or leak the active campaign across tests.
     settings.db_path = tmp_path / "test_world.db"
+    settings.campaigns_dir = tmp_path / "campaigns"
+    campaigns.reset()
     store.close()
     store.init_db()
     yield
     store.close()
+    campaigns.reset()

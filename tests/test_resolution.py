@@ -1,4 +1,4 @@
-from app.engine import resolution
+from app.engine import resolution, rules_5e
 from app.engine.types import Intent, IntentTier, ResultKind
 from app.state import game_state
 
@@ -98,9 +98,9 @@ def test_requires_check_forces_roll_against_wary_target():
 
 
 def test_determine_dc_uses_scene_table():
-    gs = _fresh()  # tavern: persuasion fixed DC 15
+    gs = _fresh()
     intent = Intent(actor_id="pc_lyra", raw_text="persuade", tier=IntentTier.A, approach="persuasion")
-    assert resolution.determine_dc(gs, intent, None) == 15
+    assert resolution.determine_dc(gs, intent, None) == gs.scene.challenges["persuasion"]
 
 
 def test_determine_dc_from_assessment():
@@ -127,6 +127,47 @@ def test_determine_dc_defaults_to_normal():
     # acrobatics not in tavern table, no assessment → default normal=15.
     intent = Intent(actor_id="pc_bram", raw_text="balance on a beam", tier=IntentTier.A, approach="acrobatics")
     assert resolution.determine_dc(gs, intent, None) == 15
+
+
+def test_determine_dc_applies_npc_disposition_offset():
+    gs = _fresh()
+    # 老佩林 is friendly (−3); persuasion scene DC is 11 → 11 − 3 = 8.
+    friendly = Intent(actor_id="pc_lyra", raw_text="說服老佩林", tier=IntentTier.A,
+                      approach="persuasion", target="老佩林")
+    assert resolution.determine_dc(gs, friendly, None) == 8
+    # 兜帽客 is afraid (−1); persuasion scene DC 11 → 10.
+    afraid = Intent(actor_id="pc_lyra", raw_text="說服兜帽客", tier=IntentTier.A,
+                    approach="persuasion", target="兜帽客")
+    assert resolution.determine_dc(gs, afraid, None) == 10
+
+
+def test_determine_dc_npc_offset_only_for_social_skills():
+    gs = _fresh()
+    # stealth is not a social skill → no disposition offset even against a friendly NPC.
+    intent = Intent(actor_id="pc_lyra", raw_text="溜過老佩林", tier=IntentTier.A,
+                    approach="stealth", target="老佩林")
+    assert resolution.determine_dc(gs, intent, None) == 15  # default normal, unmodified
+
+
+def test_determine_dc_npc_offset_stacks_with_assessment_and_floors():
+    from app.ai.schemas import DCAssessment
+    gs = _fresh()
+    # AI assessment final 2 (base 5, env −3) + friendly −3 = −1 → floored at MIN_DC.
+    intent = Intent(actor_id="pc_lyra", raw_text="說服老佩林", tier=IntentTier.A,
+                    approach="persuasion", target="老佩林")
+    a = DCAssessment(base_dc=5, env_modifier=-3, final_dc=2, env_reason="輕鬆")
+    assert resolution.determine_dc(gs, intent, a) == rules_5e.MIN_DC
+
+
+def test_resolve_records_npc_disposition_audit():
+    gs = _fresh()
+    intent = Intent(actor_id="pc_lyra", raw_text="說服老佩林", tier=IntentTier.A,
+                    action="persuade", approach="persuasion", target="老佩林")
+    res = resolution.resolve(gs, intent)
+    assert res.dc_npc_modifier == -3
+    assert res.dc_npc_disposition == "friendly"
+    # friendly −3 off the persuasion scene DC of 11.
+    assert res.dc == 8
 
 
 def test_normalize_approach_synonyms():

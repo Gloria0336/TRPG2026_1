@@ -17,8 +17,10 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
+from ..content import scenario
 from ..engine.types import Action, ActionType, Character, Damage, Event
 from ..state import game_state
+from ..world import location_registration
 
 
 router = APIRouter(prefix="/api/portal")
@@ -283,6 +285,7 @@ async def create_character(payload: CharacterCreateRequest, request: Request) ->
     gs = game_state.get_state()
     if not gs:
         gs = game_state.reset_state(channel_id=0)
+        await location_registration.ensure_seed_location_cards(gs, scenario.LOCATIONS)
     pc = _character_from_request(payload, str(user["id"]))
     gs.characters[pc.id] = pc
     gs.pc_ids.append(pc.id)

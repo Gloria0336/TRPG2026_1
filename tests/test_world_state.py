@@ -1,8 +1,8 @@
 """Step 2 — world state that survives time and revisits.
 
 2a: entity/location notes are capped so a long session can't bloat prompts.
-2b: time_of_day is world state (advances on travel/time-cost, clamps at night) and is
-    surfaced to the narrator so a stale "清晨" summary can't override an established night.
+2b: time_of_day is derived from an absolute minute clock and is surfaced to the narrator
+    so a stale "清晨" summary can't override established time.
 2c: a lasting change to a PLACE persists on the location and shows on revisits.
 """
 from app.ai import prompts
@@ -29,14 +29,26 @@ def test_entity_notes_are_capped_and_keep_identity():
 # ───────────────────────── 2b: time of day ─────────────────────────
 def test_new_game_opens_mid_morning():
     gs = game_state.reset_state(channel_id=0)
+    assert gs.flags["world_minutes"] == 540
     assert gs.time_of_day() == "上午"
 
 
-def test_advance_time_progresses_then_clamps_at_night():
+def test_advance_time_progresses_by_stage_and_wraps_days():
     gs = game_state.reset_state(channel_id=0)
-    seen = [gs.advance_time() for _ in range(10)]
-    assert seen[0] == "下午"
-    assert gs.time_of_day() == TIME_OF_DAY_STAGES[-1] == "夜晚"  # clamped, never wraps
+    seen = [gs.advance_time() for _ in range(4)]
+    assert seen == ["下午", "傍晚", "夜晚", "清晨"]
+    assert gs.time_of_day() == TIME_OF_DAY_STAGES[0] == "清晨"
+    assert gs.flags["world_minutes"] == 1740
+
+
+def test_advance_minutes_can_cross_day_boundaries():
+    gs = game_state.reset_state(channel_id=0)
+    gs.advance_minutes(16 * 60)
+    assert gs.flags["world_minutes"] == 1500
+    assert gs.time_of_day() == "夜晚"
+    gs.advance_minutes(4 * 60)
+    assert gs.flags["world_minutes"] == 1740
+    assert gs.time_of_day() == "清晨"
 
 
 def test_narrate_context_surfaces_time_of_day():

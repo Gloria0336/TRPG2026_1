@@ -17,7 +17,8 @@ from ..engine import combat, resolution
 from ..engine.combat import CombatError
 from ..engine.types import CostType, IntentTier
 from ..logging_setup import finish_recording, get_logger, start_recording
-from ..state import game_state
+from ..state import campaigns, game_state
+from ..world import location_registration, movement as world_movement
 from . import dice_animations, embeds, i18n
 from .views import ChoiceView, RollView
 
@@ -93,7 +94,10 @@ bot = commands.Bot(command_prefix="!trpg ", intents=intents, help_command=None)
 
 @bot.event
 async def on_ready():
-    store.init_db()
+    # Resume the latest per-campaign DB (migrating a pre-refactor single save first).
+    campaigns.migrate_legacy_if_needed()
+    if campaigns.resume_latest() is None:
+        store.init_db()
     if game_state.get_state() is None:
         saved = game_state.GameState.load()
         if saved:
@@ -115,6 +119,26 @@ async def on_ready():
 
 def _state_for_channel(channel_id: int) -> game_state.GameState | None:
     return game_state.active_campaign_for_channel(channel_id)
+
+
+def _is_allowed_channel_id(channel_id: int | None) -> bool:
+    allowed = settings.parsed_discord_allowed_channel_ids
+    return not allowed or (channel_id in allowed)
+
+
+def _disallowed_channel_message() -> str:
+    allowed = sorted(settings.parsed_discord_allowed_channel_ids)
+    channel_list = "、".join(_channel_ref(channel_id) for channel_id in allowed)
+    if channel_list:
+        return f"這個 bot 只能在指定頻道使用：{channel_list}"
+    return "這個 bot 目前沒有允許使用的 Discord 頻道。"
+
+
+async def _ensure_allowed_channel(interaction: discord.Interaction) -> bool:
+    if _is_allowed_channel_id(interaction.channel_id):
+        return True
+    await interaction.response.send_message(_disallowed_channel_message(), ephemeral=True)
+    return False
 
 
 def _channel_ref(channel_id: int | None) -> str:
@@ -279,7 +303,12 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                 if count == 0:
                     continue  # already a registered entity/location elsewhere
                 if count >= threshold:
-                    ent_id = store.promote_mention(scope, name, kind)
+                    if kind == "location":
+                        ent_id = await location_registration.promote_location_mention_with_card(
+                            scope, name, gs
+                        )
+                    else:
+                        ent_id = store.promote_mention(scope, name, kind)
                     log.info("entity promoted after %d mention(s): scope=%s name=%s kind=%s id=%s",
                              count, scope, name, kind, ent_id)
                 else:
@@ -338,6 +367,31 @@ def _quest_matches_text(quest: dict, text: str) -> bool:
         seed.get("objective_hint"), seed.get("premise"),
     )
     return any(str(x or "") and str(x) in text for x in fields)
+
+
+def _combat_entity_candidates(gs: game_state.GameState) -> list[dict]:
+    return [
+        e for e in gs.present_entities()
+        if e.get("kind") in {"person", "creature"}
+    ]
+
+
+def _entity_combat_trigger_id(gs: game_state.GameState, target: str | None) -> str | None:
+    if target:
+        ent = store.find_by_ref(gs.current_location_id, target)
+        if ent and ent.get("status") not in store._ABSENT_STATUSES and ent.get("kind") in {"person", "creature"}:
+            return ent["id"]
+    for ent in _combat_entity_candidates(gs):
+        if ent.get("disposition") in {"hostile", "attack"}:
+            return ent["id"]
+    return None
+
+
+def _attack_ready_entities(gs: game_state.GameState) -> list[dict]:
+    return [
+        e for e in _combat_entity_candidates(gs)
+        if e.get("disposition") == "attack"
+    ]
 
 
 def _sync_story_flags_for_accepted_quest(gs: game_state.GameState, quest: dict) -> None:
@@ -445,6 +499,9 @@ async def on_message(message: discord.Message):
 async def process_action(channel, user, actor_id: str, text: str, continue_pending: bool = False) -> None:
     log.info("process_action: channel=%s user=%s actor=%s text=%r continue_pending=%s",
              channel.id, user.id, actor_id, text, continue_pending)
+    if not _is_allowed_channel_id(channel.id):
+        log.warning("process_action: disallowed channel=%s — dropping", channel.id)
+        return
     gs = _state_for_channel(channel.id)
     if gs is None:
         log.warning("process_action: no active game in channel=%s — dropping", channel.id)
@@ -567,6 +624,10 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         log.info("process_action → _begin_scene_combat (attack triggered encounter)")
         gs.clear_pending_freeplay_action()
         await _begin_scene_combat(channel, gs)
+    elif intent.is_attack and (trigger_entity_id := _entity_combat_trigger_id(gs, intent.target)):
+        log.info("process_action → _begin_entity_combat target=%s entity=%s", intent.target, trigger_entity_id)
+        gs.clear_pending_freeplay_action()
+        await _begin_entity_combat(channel, gs, trigger_entity_id)
     elif intent.needs_check:
         log.info("process_action → _begin_check (out-of-combat check)")
         await _begin_check(channel, user, gs, pc, intent, assessment)
@@ -578,10 +639,13 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
 async def _begin_check(channel, user, gs, pc, intent, assessment) -> None:
     skill = resolution.normalize_approach(intent.approach or intent.action)
     dc = resolution.determine_dc(gs, intent, assessment)
-    log.info("_begin_check: pc=%s skill=%s dc=%s target=%s base=%s env=%s",
+    npc_mod, npc_disp = resolution.npc_dc_adjustment(gs, intent)
+    dc_note = f"{prompts.disposition_label(npc_disp)} {npc_mod:+d}" if npc_mod else None
+    log.info("_begin_check: pc=%s skill=%s dc=%s target=%s base=%s env=%s npc=%+d(%s)",
              pc.name, skill, dc, intent.target,
              assessment.base_dc if assessment else None,
-             assessment.env_modifier if assessment else None)
+             assessment.env_modifier if assessment else None,
+             npc_mod, npc_disp or "—")
     label = f"{i18n.skill(skill)}檢定"
     if intent.target:
         label += f"：{i18n.text(intent.target)}"
@@ -625,13 +689,15 @@ async def _begin_check(channel, user, gs, pc, intent, assessment) -> None:
         gs.complete_freeplay_action(pc.id)
         await _persist(gs)
         await _maybe_resolve_climax(channel, gs, result)
+        if not gs.flags.get("over") and not (gs.combat and gs.combat.active):
+            await _track_story(channel, gs)
         await _send_freeplay_turn_prompt(channel, gs)
 
     view.on_roll = on_roll
 
     gs.begin_freeplay_action(pc.id)
     await _persist(gs)
-    await channel.send(embed=embeds.roll_prompt_embed(pc, label, dc), view=view)
+    await channel.send(embed=embeds.roll_prompt_embed(pc, label, dc, dc_note), view=view)
 
 
 async def _begin_narrative(channel, user, gs, pc, intent) -> None:
@@ -665,7 +731,11 @@ async def _send_implausible_redirect(channel, user, gs, pc, intent) -> None:
     await channel.send(msg)
 
 
-def _resolve_travel_target(gs, target: str) -> dict | None:
+def _unregistered_location_target(name: str) -> dict:
+    return {"id": None, "name": name.strip(), "kind": "location", "_unregistered": True}
+
+
+def _resolve_travel_target(gs, target: str, *, register_unknown: bool = True) -> dict | None:
     """Map a free-text travel target to a location entity dict.
 
     Special case: when the target reads as the current location ("走出酒館" while
@@ -692,39 +762,192 @@ def _resolve_travel_target(gs, target: str) -> dict | None:
                 if other["id"] != here["id"]:
                     return other
             return store.resolve_or_register_location(f"{here['name']}外")
-    return store.resolve_or_register_location(target)
+    known = store.find_location(target)
+    if known is not None:
+        return known
+    if register_unknown:
+        return store.resolve_or_register_location(target)
+    return _unregistered_location_target(target)
+
+
+def _travel_metrics(src_id: str, traversed: list[str], units: list[object]) -> dict:
+    distance_km = 0.0
+    time_h = 0.0
+    prev = src_id
+    for node in traversed:
+        edge_km = world_movement.edge_distance(prev, node)
+        speeds = [world_movement.unit_speed(unit, node) for unit in units]
+        speed = min(speeds) if speeds else world_movement.DEFAULT_MOVEMENT_BASE_KMH
+        distance_km += edge_km
+        time_h += edge_km / max(speed, 0.1)
+        prev = node
+    speed_kmh = distance_km / time_h if time_h > 0 else 0.0
+    return {"distance_km": distance_km, "time_h": time_h, "speed_kmh": speed_kmh}
+
+
+def _plan_travel(src_id: str, dst_id: str, units: list[object] | None = None) -> dict:
+    """Walk the world-graph path src→dst (store.travel_path) applying the access gate per
+    node (design §6 hierarchy + §12 mixed gate). Returns:
+      reached     — furthest node the party actually enters (dst, the node before a hard gate,
+                    or None if the very next hop is hard-gated → party stays put);
+      traversed   — node ids entered, in order; cost — day-stages spent;
+      blocked     — hard-gated node id that halted travel (or None);
+      warnings    — [{id, access}] for soft-gated nodes passed through;
+      unreachable — True if dst is unknown / in a disconnected component (caller falls back).
+    No teleport: distant targets are reached by routing through intermediates, paying cost."""
+    units = units or []
+    path = store.travel_path(src_id, dst_id)
+    if path is None:
+        return {"reached": None, "traversed": [], "cost": 0, "blocked": None,
+                "warnings": [], "unreachable": True,
+                "distance_km": 0.0, "time_h": 0.0, "speed_kmh": 0.0}
+    traversed: list[str] = []
+    cost = 0
+    warnings: list[dict] = []
+    blocked: str | None = None
+    for node in path:
+        access = store.location_access(node)
+        if access["gate"] == "hard":
+            blocked = node
+            break
+        if access["gate"] == "soft":
+            warnings.append({"id": node, "access": access})
+        traversed.append(node)
+        cost += store.location_travel_cost(node)
+    metrics = _travel_metrics(src_id, traversed, units)
+    return {"reached": traversed[-1] if traversed else None, "traversed": traversed,
+            "cost": cost, "blocked": blocked, "warnings": warnings, "unreachable": False,
+            **metrics}
+
+
+def _hard_block_message(blocked_id: str | None) -> str:
+    blocked = store.get_entity_by_id(blocked_id) if blocked_id else None
+    name = (blocked or {}).get("name") or "前方"
+    access = store.location_access(blocked_id) if blocked_id else {}
+    reason = (access.get("reason") or "").strip()
+    if access.get("required_rank"):
+        head = f"⛔ 你還沒有進入「{name}」的資格（需要 {access['required_rank']} 級）。"
+    else:
+        head = f"⛔ 「{name}」此刻無法進入。"
+    return (head + reason).strip()
+
+
+def _travel_notice(plan: dict) -> str:
+    """Routing + soft-gate flavour shown before the destination scene opens."""
+    bits: list[str] = []
+    inter = plan["traversed"][:-1]  # intermediates the party passed through to get here
+    names = [(store.get_entity_by_id(i) or {}).get("name", "") for i in inter]
+    names = [n for n in names if n]
+    if names:
+        bits.append(f"🧭 你途經 {'、'.join(names)}")
+    distance = float(plan.get("distance_km") or 0.0)
+    time_h = float(plan.get("time_h") or 0.0)
+    if distance > 0 and time_h > 0:
+        bits.append(f"🧭 路程約 {_fmt_amount(distance)} km，耗時約 {_fmt_hours(time_h)}。")
+    for w in plan["warnings"]:
+        loc = store.get_entity_by_id(w["id"]) or {}
+        reason = (w["access"].get("reason") or "").strip() or "此地危險，風險自負。"
+        bits.append(f"⚠️ {loc.get('name', '')}：{reason}")
+    if plan["blocked"]:
+        b = store.get_entity_by_id(plan["blocked"]) or {}
+        bits.append(f"⛔ 再往前的「{b.get('name', '')}」擋下了去路，你止步於此。")
+    return "\n".join(bits)
+
+
+def _fmt_amount(value: float) -> str:
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def _fmt_hours(hours: float) -> str:
+    if hours < 1:
+        minutes = max(1, round(hours * 60))
+        return f"{minutes} 分鐘"
+    return f"{_fmt_amount(hours)} 小時"
 
 
 async def _begin_travel(channel, user, gs, pc, intent) -> None:
-    """Free travel (design: location is first-class state). Resolve/register the
-    destination as a location entity, move the party there, then open it — so the
-    structured location follows the fiction instead of being left behind."""
+    """Free travel (design §6: location is first-class state). Resolve/register the
+    destination, pathfind through the hierarchical world graph applying the access gate,
+    move the party to the furthest reachable node, then open it — so the structured location
+    follows the fiction instead of being left behind, and distance/danger actually bite."""
     loc = None
     try:
-        loc = _resolve_travel_target(gs, intent.target or "")
+        loc = _resolve_travel_target(gs, intent.target or "", register_unknown=False)
     except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
         log.warning("_begin_travel: resolve location failed (%s): %s", type(exc).__name__, exc)
     if loc is None:
         # Couldn't pin a destination — fall back to a plain no-roll beat.
         await _begin_narrative(channel, user, gs, pc, intent)
         return
-    if loc["id"] == gs.current_location_id:
-        # Resolver returned 'here' — the special-case logic above should have
-        # redirected, but in case of an alias collision we'd otherwise loop. Treat
-        # as a narrative non-move so play still advances.
+    if loc.get("_unregistered") or not store.get_location_card(loc.get("id")):
+        try:
+            loc, _card = await location_registration.register_location_with_card(
+                location_registration.LocationRegistrationRequest(
+                    requested_name=loc["name"],
+                    canonical_name=None if loc.get("_unregistered") else loc.get("name"),
+                    source="player_travel",
+                    state=gs,
+                    location_id=loc.get("id"),
+                    aliases=list(loc.get("aliases") or []),
+                    authored_notes=loc.get("notes") or "",
+                    player_text=getattr(intent, "raw_text", "") or "",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("_begin_travel: location card registration failed (%s): %s",
+                        type(exc).__name__, exc)
+            if loc.get("_unregistered"):
+                loc = store.resolve_or_register_location(loc["name"])
+            if loc is None:
+                await _begin_narrative(channel, user, gs, pc, intent)
+                return
+    src_id = gs.current_location_id
+    if loc["id"] == src_id:
+        # Resolver returned 'here' — the special-case logic should have redirected, but on an
+        # alias collision we'd otherwise loop. Narrate in-place so play still advances.
         log.info("_begin_travel: target resolved to current location %s — narrating in-place", loc["id"])
         await _begin_narrative(channel, user, gs, pc, intent)
         return
-    log.info("_begin_travel: %s → location id=%s name=%s", pc.name, loc["id"], loc["name"])
+
+    travel_units = gs.pcs() or [pc]
+    plan = _plan_travel(src_id, loc["id"], travel_units)
+    if plan["unreachable"]:
+        # Emergent / disconnected place (no graph adjacency) — reach it directly, design says
+        # player-invented places stay freely reachable. Single hop, its own travel_cost.
+        traversed = [loc["id"]]
+        plan = {"reached": loc["id"], "traversed": [loc["id"]],
+                "cost": store.location_travel_cost(loc["id"]), "blocked": None,
+                "warnings": [{"id": loc["id"], "access": store.location_access(loc["id"])}]
+                if store.location_access(loc["id"])["gate"] == "soft" else [],
+                "unreachable": False,
+                **_travel_metrics(src_id, traversed, travel_units)}
+    if plan["reached"] is None:
+        # The immediate next hop is hard-gated — the party doesn't move.
+        await channel.send(_hard_block_message(plan["blocked"]))
+        return
+
+    reached_id = plan["reached"]
+    reached = store.get_entity_by_id(reached_id) or loc
+    log.info("_begin_travel: %s → reached id=%s name=%s (cost=%s km=%.2f hours=%.2f blocked=%s)",
+             pc.name, reached_id, reached.get("name"), plan["cost"],
+             plan.get("distance_km") or 0.0, plan.get("time_h") or 0.0, plan["blocked"])
+    notice = _travel_notice(plan)
+    if notice:
+        await channel.send(notice)
+
     gs.clear_pending_freeplay_action()
     # Authored place → re-enter the scripted scene (keeps its challenges/encounter/entities);
     # emergent place → free location beat.
-    scene_def = scenario.scene_by_id(loc["id"])
+    scene_def = scenario.scene_by_id(reached_id)
     if scene_def:
         gs.goto_scene(scene_def)
     else:
-        gs.goto_location(loc["id"], title=loc["name"], summary=loc.get("notes") or "")
-    gs.advance_time()  # travelling between places consumes part of the day
+        gs.goto_location(reached_id, title=reached["name"], summary=reached.get("notes") or "")
+    if plan.get("time_h"):
+        gs.advance_minutes(float(plan["time_h"]) * 60)
+    elif plan["cost"]:
+        gs.advance_time(plan["cost"])  # compatibility fallback for cost-only paths
+    world_movement.advance_transits(gs.world_minutes())
     await _persist(gs)
     await _open_current_scene(channel, gs)
     if not (gs.combat and gs.combat.active):
@@ -733,6 +956,16 @@ async def _begin_travel(channel, user, gs, pc, intent) -> None:
 
 async def _begin_scene_combat(channel, gs) -> None:
     combat_state = gs.start_scene_combat()
+    if combat_state is None:
+        await channel.send("這裡沒有可以戰鬥的對象。")
+        return
+    await channel.send(embed=embeds.combat_tracker_embed(gs))
+    await _persist(gs)
+    await _progress_combat(channel, gs)
+
+
+async def _begin_entity_combat(channel, gs, trigger_entity_id: str | None = None) -> None:
+    combat_state = gs.start_entity_combat(trigger_entity_id)
     if combat_state is None:
         await channel.send("這裡沒有可以戰鬥的對象。")
         return
@@ -896,6 +1129,7 @@ async def _progress_combat(channel, gs) -> None:
         combat.advance_turn(gs)
 
     if gs.combat and not gs.combat.active:
+        gs.reconcile_combat_entities()
         await channel.send(embed=embeds.combat_tracker_embed(gs))
         await _persist(gs)
         await _after_combat(channel, gs, gs.combat.outcome)
@@ -943,7 +1177,36 @@ async def _track_story(channel, gs) -> None:
     hint = director.nudge_if_stalled(gs)
     if hint:
         await channel.send(f"🧭 {hint}")
+    if await _maybe_npc_initiated_combat(channel, gs):
+        return
     await _persist(gs)
+
+
+def _npc_initiated_combat_line(attackers: list[dict], flipped: list[str]) -> str:
+    names = "、".join(i18n.text(e["name"]) for e in attackers[:3])
+    if len(attackers) > 3:
+        names += "等人"
+    if any(e["id"] in flipped for e in attackers):
+        return f"⚔️ **{names}** 的敵意終於越線，殺意壓過最後一點克制，戰鬥爆發！"
+    return f"⚔️ **{names}** 不再等待，主動發起攻擊！"
+
+
+async def _maybe_npc_initiated_combat(channel, gs) -> bool:
+    if gs.flags.get("over") or (gs.combat and gs.combat.active):
+        return False
+    flipped = gs.escalate_hostiles()
+    attackers = _attack_ready_entities(gs)
+    if not attackers:
+        return False
+    await channel.send(_npc_initiated_combat_line(attackers, flipped))
+    combat_state = gs.start_entity_combat()
+    if combat_state is None:
+        await _persist(gs)
+        return False
+    await channel.send(embed=embeds.combat_tracker_embed(gs))
+    await _persist(gs)
+    await _progress_combat(channel, gs)
+    return True
 
 
 async def _maybe_resolve_climax(channel, gs, result) -> None:
@@ -983,6 +1246,7 @@ async def _open_current_scene(channel, gs) -> None:
 
 async def _end_game(channel, gs, ending: str) -> None:
     gs.flags["over"] = True
+    campaigns.mark_finished(outcome=ending)
     gs.add_system_event("scene", "冒險告一段落。", ending)
     await channel.send(embed=discord.Embed(title="🏁 冒險結束", description=ending, color=discord.Color.gold()))
     await channel.send("感謝遊玩！可以使用 `/start` 再跑一次。")
@@ -991,6 +1255,8 @@ async def _end_game(channel, gs, ending: str) -> None:
 
 @bot.tree.command(description="在此頻道開始新的冒險。")
 async def start(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     msg = _start_block_message(interaction.channel_id)
     if msg:
         await interaction.response.send_message(msg, ephemeral=True)
@@ -1003,8 +1269,10 @@ async def start(interaction: discord.Interaction):
             previous.channel_id,
         )
     start_recording(channel_id=interaction.channel_id, actor=str(interaction.user.id))
+    await interaction.response.defer(thinking=True)
     gs = game_state.reset_state(channel_id=interaction.channel_id)
-    await interaction.response.send_message(embed=embeds.intro_embed())
+    await location_registration.ensure_seed_location_cards(gs, scenario.LOCATIONS)
+    await interaction.followup.send(embed=embeds.intro_embed())
     await interaction.followup.send(embed=embeds.roster_embed(gs), view=_join_view(interaction.channel))
     await _persist(gs)
 
@@ -1018,6 +1286,8 @@ def _join_view(channel) -> discord.ui.View:
         btn = discord.ui.Button(label=label, style=discord.ButtonStyle.success, disabled=taken)
 
         async def cb(interaction: discord.Interaction, _pid=pc.id, _name=pc.name):
+            if not await _ensure_allowed_channel(interaction):
+                return
             ok = gs.claim_pc(str(interaction.user.id), _pid, _display_name(interaction.user))
             if not ok:
                 await interaction.response.send_message(f"{i18n.name(_name)} 已經被選走了，請選另一位英雄。", ephemeral=True)
@@ -1041,6 +1311,8 @@ def _join_view(channel) -> discord.ui.View:
     app_commands.Choice(name="Lyra Dawnbringer", value="lyra"),
 ])
 async def join(interaction: discord.Interaction, character: str):
+    if not await _ensure_allowed_channel(interaction):
+        return
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請先使用 `/start`。", ephemeral=True)
@@ -1063,6 +1335,8 @@ async def join(interaction: discord.Interaction, character: str):
 @bot.tree.command(description="宣告你的角色現在要進行的動作。")
 @app_commands.describe(text="例如：說服旅店老闆、搜索房間、攻擊哥布林")
 async def action(interaction: discord.Interaction, text: str):
+    if not await _ensure_allowed_channel(interaction):
+        return
     log.info("/action received: user=%s channel=%s text=%r",
              interaction.user.id, interaction.channel_id, text)
     gs = _state_for_channel(interaction.channel_id)
@@ -1085,6 +1359,8 @@ async def action(interaction: discord.Interaction, text: str):
 
 @bot.tree.command(description="顯示角色卡（預設顯示你的角色）。")
 async def character(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請使用 `/start`。", ephemeral=True)
@@ -1098,6 +1374,8 @@ async def character(interaction: discord.Interaction):
 
 @bot.tree.command(description="重新描述目前的場景與處境（依當前狀態即時生成）。")
 async def scene(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請使用 `/start`。", ephemeral=True)
@@ -1112,6 +1390,8 @@ async def scene(interaction: discord.Interaction):
 @bot.tree.command(description="手動擲骰，例如 /roll 1d20+3")
 @app_commands.describe(notation="骰式，例如 1d20+3、2d6、d20")
 async def roll(interaction: discord.Interaction, notation: str = "1d20"):
+    if not await _ensure_allowed_channel(interaction):
+        return
     from ..engine import dice
 
     try:
@@ -1130,6 +1410,8 @@ async def roll(interaction: discord.Interaction, notation: str = "1d20"):
 
 @bot.tree.command(description="開始目前場景的戰鬥（如果有）。")
 async def fight(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請使用 `/start`。", ephemeral=True)
@@ -1143,12 +1425,15 @@ async def fight(interaction: discord.Interaction):
 
 @bot.tree.command(description="強制結束目前戰役。")
 async def finish(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     gs, msg = _finish_target_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message(msg or "這裡目前沒有進行中的戰役。", ephemeral=True)
         return
     was_unbound = not game_state.has_discord_channel_binding(gs)
     gs.flags["over"] = True
+    campaigns.mark_finished(outcome="forced")
     gs.clear_pending_freeplay_action()
     gs.combat = None
     gs.add_system_event("scene", "戰役被強制結束。", f"{interaction.user.display_name} 使用 /finish 結束了戰役。")
@@ -1162,6 +1447,8 @@ async def finish(interaction: discord.Interaction):
 
 @bot.tree.command(description="重新啟動機器人程序並重新讀取程式內容。")
 async def restart(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     gs = game_state.get_state()
     if gs:
         await _persist(gs)
@@ -1172,6 +1459,8 @@ async def restart(interaction: discord.Interaction):
 
 @bot.tree.command(description="查看玩法說明。")
 async def help(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
+        return
     e = discord.Embed(title="玩法說明", description=scenario.HOW_TO_PLAY, color=discord.Color.blurple())
     e.add_field(
         name="指令",

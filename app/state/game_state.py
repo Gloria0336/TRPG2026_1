@@ -13,6 +13,7 @@ from ..config import settings
 from ..content import monsters, scenario
 from ..content.characters import premade_pcs
 from ..db import store
+from . import campaigns
 from ..engine.combat import start_combat
 from ..engine.types import Character, CombatState, Event, ResolutionResult
 from ..logging_setup import get_logger
@@ -53,9 +54,20 @@ def _dashboard_quest(q: dict) -> dict:
     return payload
 
 
-# Ordered day stages (design: time is world state, not narrator whim). Advances on travel
-# and on time-cost results; clamps at the final stage for a single one-shot day.
+# Ordered day stages (design: time is world state, not narrator whim). The canonical
+# clock is absolute minutes in flags["world_minutes"]; stages are derived labels.
 TIME_OF_DAY_STAGES = ["清晨", "上午", "下午", "傍晚", "夜晚"]
+WORLD_START_MINUTES = 9 * 60
+STAGE_START_MINUTES = {
+    "清晨": 5 * 60,
+    "上午": 8 * 60,
+    "下午": 12 * 60,
+    "傍晚": 17 * 60,
+    "夜晚": 20 * 60,
+}
+_COMBAT_ENTITY_KINDS = {"person", "creature"}
+_HOSTILE_COMBAT_DISPOSITIONS = {"hostile", "attack"}
+_HOSTILE_SINCE_FLAG = "hostile_since_round"
 
 
 # ───────────────────────── Scene ─────────────────────────
@@ -297,19 +309,66 @@ class GameState:
         self.bump()
 
     # ── time of day (world state) ──
+    def world_minutes(self) -> int:
+        raw = self.flags.get("world_minutes")
+        if isinstance(raw, (int, float)):
+            minutes = int(raw)
+        else:
+            legacy = self.flags.get("time_of_day")
+            if legacy in STAGE_START_MINUTES:
+                minutes = WORLD_START_MINUTES if legacy == "上午" else STAGE_START_MINUTES[str(legacy)]
+            else:
+                minutes = WORLD_START_MINUTES
+            self.flags["world_minutes"] = minutes
+        self.flags["time_of_day"] = self._stage_for_minutes(minutes)
+        return minutes
+
+    @staticmethod
+    def _stage_for_minutes(minutes: int) -> str:
+        minute = int(minutes) % (24 * 60)
+        if STAGE_START_MINUTES["清晨"] <= minute < STAGE_START_MINUTES["上午"]:
+            return "清晨"
+        if STAGE_START_MINUTES["上午"] <= minute < STAGE_START_MINUTES["下午"]:
+            return "上午"
+        if STAGE_START_MINUTES["下午"] <= minute < STAGE_START_MINUTES["傍晚"]:
+            return "下午"
+        if STAGE_START_MINUTES["傍晚"] <= minute < STAGE_START_MINUTES["夜晚"]:
+            return "傍晚"
+        return "夜晚"
+
     def time_of_day(self) -> str:
-        cur = self.flags.get("time_of_day")
-        return str(cur) if cur in TIME_OF_DAY_STAGES else TIME_OF_DAY_STAGES[1]
+        return self._stage_for_minutes(self.world_minutes())
+
+    def advance_minutes(self, mins: int | float) -> str:
+        delta = max(0, int(round(float(mins))))
+        if delta <= 0:
+            return self.time_of_day()
+        minutes = self.world_minutes() + delta
+        self.flags["world_minutes"] = minutes
+        self.flags["time_of_day"] = self._stage_for_minutes(minutes)
+        self.bump()
+        return str(self.flags["time_of_day"])
 
     def advance_time(self, steps: int = 1) -> str:
-        """Move the clock forward, clamped at the last stage (one-shot spans one day)."""
-        i = TIME_OF_DAY_STAGES.index(self.time_of_day())
-        i = min(i + max(int(steps), 0), len(TIME_OF_DAY_STAGES) - 1)
-        new = TIME_OF_DAY_STAGES[i]
-        if new != self.flags.get("time_of_day"):
-            self.flags["time_of_day"] = new
-            self.bump()
-        return new
+        """Advance by whole day-stage boundaries, preserving old callers."""
+        step_count = max(int(steps), 0)
+        if step_count <= 0:
+            return self.time_of_day()
+        minutes = self.world_minutes()
+        minute_of_day = minutes % (24 * 60)
+        current_stage = self._stage_for_minutes(minutes)
+        current_index = TIME_OF_DAY_STAGES.index(current_stage)
+        cycle_day = minutes // (24 * 60)
+        if current_stage == "夜晚" and minute_of_day < STAGE_START_MINUTES["清晨"]:
+            cycle_day -= 1
+        total_index = current_index + step_count
+        day_offset, target_index = divmod(total_index, len(TIME_OF_DAY_STAGES))
+        target_stage = TIME_OF_DAY_STAGES[target_index]
+        target_minutes = (cycle_day + day_offset) * (24 * 60) + STAGE_START_MINUTES[target_stage]
+        self.flags["world_minutes"] = target_minutes
+        self.flags["time_of_day"] = target_stage
+        self.bump()
+        return target_stage
 
     def _mark_visited(self, location_id: str) -> None:
         """Append to the party's visited-locations trail (drives the goal director)."""
@@ -358,6 +417,29 @@ class GameState:
             log.warning("all_entities: DB read failed: %s", exc)
             return []
 
+    @staticmethod
+    def _can_fight_as_entity(ent: dict) -> bool:
+        return ent.get("kind") in _COMBAT_ENTITY_KINDS
+
+    def _write_entity_state(
+        self,
+        ent: dict,
+        *,
+        status: str | None = None,
+        disposition: str | None = None,
+        flags: dict | None = None,
+    ) -> None:
+        store.upsert_entity(
+            id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
+            aliases=ent.get("aliases", []),
+            status=status if status is not None else ent["status"],
+            location_id=ent.get("location_id"),
+            disposition=disposition if disposition is not None else ent.get("disposition"),
+            flags=flags if flags is not None else ent.get("flags", {}),
+            notes=ent.get("notes", ""),
+            first_seen_event_id=ent.get("first_seen_event_id"),
+        )
+
     def start_scene_combat(self) -> CombatState | None:
         """Spawn the current scene's encounter monsters and roll initiative."""
         scene_def = scenario.scene_by_id(self.scene.id)
@@ -373,6 +455,102 @@ class GameState:
         combat = start_combat(self, participant_ids)
         self.bump()
         return combat
+
+    def start_entity_combat(self, trigger_entity_id: str | None = None) -> CombatState | None:
+        """Spawn hostile/attacking present entities as temporary combatants."""
+        enemies: list[dict] = []
+        seen: set[str] = set()
+        for ent in self.present_entities():
+            ent_id = ent.get("id")
+            if not ent_id or ent_id in seen or not self._can_fight_as_entity(ent):
+                continue
+            should_join = ent.get("disposition") in _HOSTILE_COMBAT_DISPOSITIONS
+            if trigger_entity_id and ent_id == trigger_entity_id:
+                should_join = True
+                if ent.get("disposition") not in _HOSTILE_COMBAT_DISPOSITIONS:
+                    flags = dict(ent.get("flags") or {})
+                    flags.pop(_HOSTILE_SINCE_FLAG, None)
+                    self._write_entity_state(ent, disposition="hostile", flags=flags)
+                    ent = {**ent, "disposition": "hostile", "flags": flags}
+            if should_join:
+                enemies.append(ent)
+                seen.add(ent_id)
+
+        if not enemies:
+            return None
+
+        spawned: list[str] = []
+        for ent in enemies:
+            mon = monsters.spawn_from_entity(ent)
+            self.characters[mon.id] = mon
+            spawned.append(mon.id)
+        participant_ids = [pid for pid in self.pc_ids if pid in self.characters] + spawned
+        if not spawned or not participant_ids:
+            return None
+        combat = start_combat(self, participant_ids)
+        self.bump()
+        return combat
+
+    def escalate_hostiles(self) -> list[str]:
+        """Promote NPCs from sustained hostile posture into active attack state."""
+        try:
+            round_no = int(self.flags.get("freeplay_round", 1))
+        except (TypeError, ValueError):
+            round_no = 1
+        flipped: list[str] = []
+        changed = False
+
+        for ent in self.present_entities():
+            if not self._can_fight_as_entity(ent):
+                continue
+            flags = dict(ent.get("flags") or {})
+            if ent.get("disposition") == "hostile":
+                try:
+                    since = int(flags.get(_HOSTILE_SINCE_FLAG))
+                except (TypeError, ValueError):
+                    since = round_no
+                    flags[_HOSTILE_SINCE_FLAG] = since
+                    store.merge_entity_flags(ent["id"], {_HOSTILE_SINCE_FLAG: since})
+                    changed = True
+                    continue
+                if round_no - since >= 3:
+                    flags.pop(_HOSTILE_SINCE_FLAG, None)
+                    self._write_entity_state(ent, disposition="attack", flags=flags)
+                    flipped.append(ent["id"])
+                    changed = True
+            elif _HOSTILE_SINCE_FLAG in flags:
+                store.merge_entity_flags(ent["id"], remove=[_HOSTILE_SINCE_FLAG])
+                changed = True
+
+        if changed:
+            self.bump()
+        return flipped
+
+    def reconcile_combat_entities(self) -> list[str]:
+        """Write entity-backed combat outcomes back to the durable world state."""
+        if not self.combat:
+            return []
+        touched: list[str] = []
+        outcome = self.combat.outcome
+        for cid, _init in self.combat.order:
+            ch = self.characters.get(cid)
+            if ch is None or ch.is_pc:
+                continue
+            ent = store.get_entity_by_id(cid)
+            if ent is None:
+                continue
+            flags = dict(ent.get("flags") or {})
+            flags.pop(_HOSTILE_SINCE_FLAG, None)
+            if ch.is_dead or ch.is_down:
+                self._write_entity_state(ent, status="dead", flags=flags)
+            elif outcome == "victory":
+                self._write_entity_state(ent, disposition="cowed", flags=flags)
+            else:
+                self._write_entity_state(ent, flags=flags)
+            touched.append(cid)
+        if touched:
+            self.bump()
+        return touched
 
     # ── event log ──
     def add_event(self, event: Event) -> Event:
@@ -514,6 +692,7 @@ class GameState:
         gs.scene = Scene.from_dict(d["scene"]) if d.get("scene") else gs.scene
         gs.party_location_id = d.get("party_location_id") or gs.scene.id
         gs.flags = d.get("flags", {})
+        gs.world_minutes()
         # Pending freeplay actions are backed by Discord button callbacks, which
         # live only in memory. After a restart/load the button can no longer
         # complete, so keeping this flag would block new /action commands before
@@ -526,11 +705,13 @@ class GameState:
         return gs
 
     def save(self) -> None:
-        settings.session_path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        path = campaigns.active_session_path() or settings.session_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls) -> "GameState | None":
-        path = settings.session_path
+        path = campaigns.active_session_path() or settings.session_path
         if not path.exists():
             return None
         try:
@@ -543,15 +724,18 @@ class GameState:
 def new_game(channel_id: int | None = None) -> "GameState":
     """Fresh session: load the two pre-made PCs and the opening scene."""
     gs = GameState(channel_id=channel_id)
-    # Start each campaign from a clean continuity store (entities/history/summaries).
+    # Each campaign gets its OWN fresh, empty continuity store (案 A): begin_new opens a
+    # new per-campaign world.db so runtime data never pollutes the authored starter
+    # content. Seeding then loads the starter locations/entities into that clean DB.
     try:
-        store.reset_world()
+        campaigns.begin_new(channel_id, title=scenario.TITLE)
         store.seed_locations(scenario.LOCATIONS)
     except Exception as exc:  # noqa: BLE001
-        log.warning("new_game: DB reset/seed failed (%s): %s", type(exc).__name__, exc)
+        log.warning("new_game: campaign begin/seed failed (%s): %s", type(exc).__name__, exc)
     for pc in premade_pcs():
         gs.characters[pc.id] = pc
         gs.pc_ids.append(pc.id)
+    gs.flags["world_minutes"] = WORLD_START_MINUTES
     gs.flags["time_of_day"] = TIME_OF_DAY_STAGES[1]  # campaign opens mid-morning
     gs.goto_scene(scenario.first_scene())
     gs.started = True

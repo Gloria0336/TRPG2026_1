@@ -46,6 +46,25 @@ BAND_DC: dict[str, int] = {
 # Environment modifier (design: 場景目標難度). AI judges the current scene/target and
 # returns a signed offset in ±ENV_MODIFIER_CAP (favourable → negative, hostile → positive).
 ENV_MODIFIER_CAP: int = 4
+
+# NPC disposition → DC offset (design: 態度數值化). A deterministic, engine-owned offset
+# applied to SOCIAL checks against a dispositioned NPC: a friendlier target is easier to
+# sway, a hostile one resists harder. The AI never picks this — it is looked up from the
+# target entity's stored `disposition` by resolution.npc_dc_adjustment.
+DISPOSITION_DC_MOD: dict[str, int] = {
+    "friendly": -3,
+    "afraid": -1,
+    "cowed": -2,
+    "neutral": 0,
+    "wary": +1,
+    "hostile": +3,
+    "attack": +5,
+}
+
+
+def npc_modifier(disposition: str | None) -> int:
+    """DC offset for a target NPC's disposition; 0 for unknown/None (design: 態度數值化)."""
+    return DISPOSITION_DC_MOD.get(disposition or "", 0)
 # Floor for any computed DC. A right-tool-on-an-easy-target combo can drop below 5
 # (e.g. base 5 − 3 = DC 2 ≈ "almost certainly succeeds"); MIN_DC just stops it going
 # nonsensical (≤0 would auto-pass even a nat-1 fumble before mods).

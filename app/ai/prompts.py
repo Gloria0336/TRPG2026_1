@@ -12,6 +12,7 @@ from .schemas import (
     ALLOWED_SKILLS,
     EXTRACT_JSON_SHAPE,
     INTENT_JSON_SHAPE,
+    LOCATION_CARD_JSON_SHAPE,
     QUEST_DETAILS_JSON_SHAPE,
     QUEST_SEED_JSON_SHAPE,
 )
@@ -24,8 +25,15 @@ if TYPE_CHECKING:
 # Chinese labels for entity state markers shown to the narrator.
 _DISPOSITION_ZH = {
     "friendly": "友善", "neutral": "中立", "wary": "戒備",
-    "afraid": "驚懼", "hostile": "敵意", "cowed": "屈服",
+    "afraid": "驚懼", "hostile": "敵意", "attack": "發動攻擊", "cowed": "屈服",
 }
+
+
+def disposition_label(disposition: str | None) -> str:
+    """Chinese label for an NPC disposition; falls back to the raw value, '' for None."""
+    if not disposition:
+        return ""
+    return _DISPOSITION_ZH.get(disposition, disposition)
 _STATUS_ZH = {
     "present": "在場", "departed": "已離開", "hidden": "躲藏",
     "dead": "死亡", "destroyed": "已毀壞", "unknown": "不明",
@@ -47,24 +55,16 @@ def current_location_label(state: "GameState") -> str:
 
 def known_exits(state: "GameState", *, limit: int = 8) -> list[dict]:
     """Locations the party could plausibly travel to next. Prefers the current location's
-    authored adjacency (connects + parent); falls back to the full registry minus 'here'
-    for emergent places that carry no adjacency, so the player is never stranded."""
+    world-graph neighbours (connects + parent + children); falls back to the full registry
+    minus 'here' for emergent places that carry no adjacency, so the player is never stranded."""
     try:
-        all_locs = store.get_locations()
-    except Exception:  # noqa: BLE001
-        return []
-    here_id = state.current_location_id
-    by_id = {e["id"]: e for e in all_locs}
-    here_flags = (by_id.get(here_id) or {}).get("flags") or {}
-    adjacent_ids = list(here_flags.get("connects") or [])
-    parent = here_flags.get("parent")
-    if parent and parent not in adjacent_ids:
-        adjacent_ids.append(parent)
-    if adjacent_ids:
-        exits = [by_id[i] for i in adjacent_ids if i in by_id and i != here_id]
+        here_id = state.current_location_id
+        exits = store.travel_options(here_id)
         if exits:
             return exits[:limit]
-    return [e for e in all_locs if e["id"] != here_id][:limit]
+        return [e for e in store.get_locations() if e["id"] != here_id][:limit]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _entity_conditions(e: dict) -> list[str]:
@@ -121,6 +121,81 @@ def compose_scene_summary(state: "GameState") -> str:
 
 
 # ───────────────────────── Intent parser ─────────────────────────
+def _location_card_block(state: "GameState") -> str:
+    """Compact generated location anchors the model must not contradict."""
+    try:
+        card = store.get_location_card(state.current_location_id)
+    except Exception:  # noqa: BLE001
+        card = None
+    if not card:
+        return ""
+    lines = [
+        "LOCATION CARD ANCHORS (stable generated truth; do not contradict):",
+        f"- canonical_name: {card.get('canonical_name') or current_location_label(state)}",
+    ]
+    if card.get("mood"):
+        lines.append(f"- mood: {card['mood']}")
+    if card.get("base_summary"):
+        lines.append(f"- base_summary: {truncate(card['base_summary'], 300)}")
+    for key, label in (
+        ("sensory_anchors", "sensory"),
+        ("visual_landmarks", "landmarks"),
+        ("interactive_features", "interactive"),
+        ("discoverables", "discoverables"),
+        ("hazards", "hazards"),
+        ("soft_hooks", "hooks"),
+        ("exits_hint", "exits"),
+    ):
+        values = card.get(key) or []
+        if values:
+            lines.append(f"- {label}: " + "; ".join(str(v) for v in values[:4]))
+    return "\n".join(lines)
+
+
+LOCATION_CARD_SYSTEM = f"""You are a LOCATION REGISTRATION AGENT for a living-world D&D 5e engine.
+
+Your job is to turn a location registration request into stable structured world data.
+Write all player-facing fields in Traditional Chinese.
+
+Rules:
+- Preserve the requested location name exactly unless a canonical authored name is provided.
+- Treat authored notes, aliases, parent, connects, current location, recent events, and player wording as hard context.
+- Create sensory and exploration anchors that future narration can reuse.
+- Do not decide success/failure, DCs, HP, damage, treasure quantities, or mechanical outcomes.
+- Set terrain_modifier only as travel friction: 1.0 normal road, below 1.0 rough/difficult, above 1.0 easy/clear. Do not use it for success odds.
+- Do not create NPC/entity records. You may mention vague traces, landmarks, hazards, or hooks only as location texture.
+- Avoid contradicting existing locations or moving the party.
+- Keep the card concise and reusable.
+
+Return ONLY JSON in this exact shape:
+{LOCATION_CARD_JSON_SHAPE}"""
+
+
+def location_card_context(request: dict) -> str:
+    existing = request.get("existing_locations") or []
+    existing_lines = []
+    for loc in existing[:16]:
+        aliases = loc.get("aliases") or []
+        alias_text = f" (aliases: {', '.join(aliases)})" if aliases else ""
+        existing_lines.append(f"- {loc.get('name', '')}{alias_text}")
+    recent = request.get("recent_events") or []
+    recent_lines = "\n".join(str(e) for e in recent[-6:]) or "- (no recent events)"
+    return "\n".join([
+        f"REQUESTED_NAME: {request.get('requested_name', '')}",
+        f"CANONICAL_NAME: {request.get('canonical_name') or ''}",
+        f"SOURCE: {request.get('source', '')}",
+        f"CURRENT_LOCATION: {request.get('current_location', '')}",
+        f"AUTHORED_NOTES: {request.get('authored_notes') or ''}",
+        "ALIASES: " + ", ".join(request.get("aliases") or []),
+        f"PARENT: {request.get('parent') or ''}",
+        "CONNECTS: " + ", ".join(request.get("connects") or []),
+        f"PLAYER_TEXT: {request.get('player_text') or ''}",
+        "EXISTING_LOCATIONS:\n" + ("\n".join(existing_lines) or "- none"),
+        "RECENT_EVENTS:\n" + recent_lines,
+        "Generate the location card JSON now.",
+    ])
+
+
 INTENT_SYSTEM = f"""You are the INTENT PARSER for a living_world game run by a \
 program. Your ONLY job is to turn a player's natural-language message into a structured \
 intent. You must NEVER decide whether an action succeeds, NEVER narrate outcomes, and \
@@ -218,7 +293,7 @@ can suggest legitimate approaches.
 
 Set `is_attack` true ONLY if the player is trying to physically attack/fight someone.
 
-DIFFICULTY (only for off-table actions the scene table doesn't already price):
+DIFFICULTY (set this whenever a roll is needed — you own the DC):
 - `difficulty_band` rates how hard the player's chosen METHOD is — using the right \
 tool/skill is low, brute-forcing or an ill-suited method is high:
   very_easy(用對方法幾乎必成) / easy / normal / hard / extreme / legendary(蠻幹/外行硬上).
@@ -228,8 +303,9 @@ conditions go negative, hostile conditions go positive. Example: 普通木門 �
 監牢大門 → about +4. Put a short reason in `env_reason`.
 - The final DC = band base + env_modifier, computed by the program. Do NOT fold tools, \
 allies, or spent resources into either value — the program applies those to the player's \
-roll, not the DC. Leave `difficulty_band` null (and env_modifier 0) for on-table actions \
-the scene already covers, or when no roll is needed.
+roll, not the DC. Pick the band/modifier on the action's own merits — do NOT default to \
+`normal`/0 when the action is clearly easier or harder. Leave `difficulty_band` null (and \
+env_modifier 0) ONLY when no roll is needed.
 Write all player-facing `question`, `candidates`, and `options` in Traditional Chinese.
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):
@@ -304,7 +380,6 @@ def intent_context(
     # parser can no longer be fed a stale scripted blurb while the fiction has moved on.
     present = [e for e in state.present_entities() if e.get("kind") != "location"]
     npcs = ", ".join(e["name"] for e in present) if present else "none notable"
-    table = ", ".join(f"{k} (DC {v})" for k, v in state.scene.challenges.items()) or "none predefined"
     in_combat = "YES — this is a combat turn." if (state.combat and state.combat.active) else "no"
     carried = "、".join(actor.inventory) if getattr(actor, "inventory", None) else "（無特別裝備）"
 
@@ -329,6 +404,9 @@ def intent_context(
         f"NPCs/targets present: {npcs}",
         exits_block,
     ]
+    card_block = _location_card_block(state)
+    if card_block:
+        parts.append(card_block)
     brief = _condition_brief(present)
     if brief:
         parts.append(
@@ -338,7 +416,6 @@ def intent_context(
             "offer威嚇/魅惑/洞察 options for that target."
         )
     parts += [
-        f"Known location checks: {table}",
         f"In combat: {in_combat}",
         f"ACTOR: {actor.name} (proficient skills: {skills})",
         f"ACTOR INVENTORY: {carried}",
@@ -438,6 +515,9 @@ def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
         f"LOCATION: {current_location_label(state)}\n{compose_scene_summary(state)}",
         f"現在時段：{state.time_of_day()}（以此為準；場景描述若暗示其他時間，一律以此時段為準）",
     ]
+    card_block = _location_card_block(state)
+    if card_block:
+        parts.append(card_block)
     if entities:
         parts.append(entities)
     quests = _quests_block(state)
@@ -568,6 +648,7 @@ def scene_context(state: "GameState") -> str:
         f"LOCATION: {current_location_label(state)}",
         compose_scene_summary(state),
         f"現在時段：{state.time_of_day()}（以此為準；場景描述若暗示其他時間，一律以此時段為準）",
+        _location_card_block(state),
         "Establish this location now in Traditional Chinese:",
     ])
 
@@ -593,6 +674,7 @@ def scene_recap_context(state: "GameState") -> str:
         compose_scene_summary(state),
         f"現在時段：{state.time_of_day()}（以此為準）",
         f"RECENT EVENTS:\n{history}",
+        _location_card_block(state),
         "Describe the current situation now in Traditional Chinese:",
     ])
 
@@ -612,7 +694,8 @@ return {{"deltas": []}}.
 existing entities.
 - Set `status` to "departed" when someone leaves/flees/exits the scene, "dead" when they \
 die, "hidden" when they conceal themselves. Set `disposition` only when their attitude \
-clearly shifts.
+clearly shifts. Use `disposition`:"attack" only when that NPC has clearly decided to \
+start violence now and should pull the party into turn-based combat.
 - Use `add_conditions` / `remove_conditions` ONLY when the narration shows the entity \
 *newly* gained or *clearly lost* a mechanical state — e.g. tied up → add ["restrained"], \
 the figure awoke → remove ["unconscious", "hypnotized"]. Pick ids from the allowed list \

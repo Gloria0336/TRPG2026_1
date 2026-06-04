@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS entities (
     aliases             TEXT NOT NULL DEFAULT '[]',  -- JSON array of names the narrator may use
     status              TEXT NOT NULL DEFAULT 'present',  -- present|departed|hidden|dead|destroyed|unknown
     location_id         TEXT,                        -- where it is now (scene id or another entity)
-    disposition         TEXT,                        -- friendly|neutral|wary|afraid|hostile|cowed | NULL
+    disposition         TEXT,                        -- friendly|neutral|wary|afraid|hostile|attack|cowed | NULL
     flags               TEXT NOT NULL DEFAULT '{}',  -- JSON: arbitrary markers, e.g. {"questioned": true}
     notes               TEXT NOT NULL DEFAULT '',    -- accumulated key facts about this entity
     first_seen_event_id TEXT,
@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS entities (
     updated_ts          REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_entities_scene ON entities(scene_id);
+
+CREATE TABLE IF NOT EXISTS vehicle_types (
+    type     TEXT PRIMARY KEY,
+    modifier REAL NOT NULL DEFAULT 1.0
+);
 
 -- ── Dynamic scene summary. New design: base_summary is the static backstory used
 --    only when opening the scene; current_summary is recomputed every beat from
@@ -38,6 +43,25 @@ CREATE TABLE IF NOT EXISTS scene_state (
 
 -- ── Append-only history (design §5.2 / §6). Single source of "world remembers".
 --    Mirrors the in-memory Event and additionally persists the AI prose.
+CREATE TABLE IF NOT EXISTS location_cards (
+    location_id          TEXT PRIMARY KEY,
+    canonical_name       TEXT NOT NULL DEFAULT '',
+    aliases              TEXT NOT NULL DEFAULT '[]',
+    base_summary         TEXT NOT NULL DEFAULT '',
+    sensory_anchors      TEXT NOT NULL DEFAULT '[]',
+    visual_landmarks     TEXT NOT NULL DEFAULT '[]',
+    interactive_features TEXT NOT NULL DEFAULT '[]',
+    discoverables        TEXT NOT NULL DEFAULT '[]',
+    hazards              TEXT NOT NULL DEFAULT '[]',
+    soft_hooks           TEXT NOT NULL DEFAULT '[]',
+    exits_hint           TEXT NOT NULL DEFAULT '[]',
+    mood                 TEXT NOT NULL DEFAULT '',
+    generated_source     TEXT NOT NULL DEFAULT '',
+    generated_ts         REAL NOT NULL,
+    updated_ts           REAL NOT NULL,
+    FOREIGN KEY(location_id) REFERENCES entities(id)
+);
+
 CREATE TABLE IF NOT EXISTS event_log (
     id          TEXT PRIMARY KEY,
     scene_id    TEXT,

@@ -72,6 +72,7 @@ Copy-Item .env.example .env
 ```text
 DISCORD_TOKEN=...                     # 執行 bot 必填
 DISCORD_GUILD_ID=...                  # 選填：讓 slash command 立即同步到單一伺服器
+DISCORD_ALLOWED_CHANNEL_IDS=...       # 選填：限制 bot 只在指定頻道 ID 使用，多個以逗號分隔
 OPENROUTER_API_KEY=sk-or-...          # 省略時會使用離線 / fallback AI 模式
 MODEL_INTENT=openai/gpt-4o-mini       # 便宜模型：意圖解析
 MODEL_NARRATE=anthropic/claude-sonnet-4.5  # 強模型：敘事

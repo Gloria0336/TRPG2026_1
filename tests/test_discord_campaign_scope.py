@@ -2,6 +2,20 @@ from app.discord_bot import bot as discord_bot
 from app.state import game_state
 
 
+def test_discord_channel_allowlist_defaults_to_open(monkeypatch):
+    monkeypatch.setattr(discord_bot.settings, "discord_allowed_channel_ids", "")
+
+    assert discord_bot._is_allowed_channel_id(123)
+
+
+def test_discord_channel_allowlist_rejects_other_channels(monkeypatch):
+    monkeypatch.setattr(discord_bot.settings, "discord_allowed_channel_ids", "1511969579574755409")
+
+    assert discord_bot._is_allowed_channel_id(1511969579574755409)
+    assert not discord_bot._is_allowed_channel_id(123)
+    assert "<#1511969579574755409>" in discord_bot._disallowed_channel_message()
+
+
 def test_start_does_not_block_on_unbound_active_campaign():
     game_state.set_state(None)
     game_state.reset_state(channel_id=0)

@@ -20,6 +20,7 @@ save/
 logs/trace.log
 logs/trace.log.*
 logs/trace_*.log
+logs/intent_ab/
 
 # Single-instance lockfile
 logs/app.lock

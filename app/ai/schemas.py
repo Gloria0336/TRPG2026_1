@@ -252,6 +252,47 @@ class QuestDetails(BaseModel):
         return quest_taxonomy.normalize_tags(value if isinstance(value, dict) else {})
 
 
+class LocationCard(BaseModel):
+    """Stable generated anchors for an entity-backed location."""
+
+    canonical_name: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    base_summary: str = ""
+    sensory_anchors: list[str] = Field(default_factory=list)
+    visual_landmarks: list[str] = Field(default_factory=list)
+    interactive_features: list[str] = Field(default_factory=list)
+    discoverables: list[str] = Field(default_factory=list)
+    hazards: list[str] = Field(default_factory=list)
+    soft_hooks: list[str] = Field(default_factory=list)
+    exits_hint: list[str] = Field(default_factory=list)
+    mood: str = ""
+    terrain_modifier: float = 1.0
+
+    @field_validator(
+        "aliases",
+        "sensory_anchors",
+        "visual_landmarks",
+        "interactive_features",
+        "discoverables",
+        "hazards",
+        "soft_hooks",
+        "exits_hint",
+        mode="before",
+    )
+    @classmethod
+    def _location_lists_none_to_empty(cls, value: object) -> object:
+        return [] if value is None else value
+
+    @field_validator("terrain_modifier", mode="before")
+    @classmethod
+    def _terrain_modifier_bounds(cls, value: object) -> float:
+        try:
+            parsed = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            parsed = 1.0
+        return max(0.3, min(2.0, parsed))
+
+
 _KNOWN_CONDITION_IDS = sorted(cond.CATALOG.keys())
 
 
@@ -331,5 +372,23 @@ QUEST_DETAILS_JSON_SHAPE = (
     '  "failure_risks": [what happens if ignored/fails],\n'
     '  "reward": reward text,\n'
     '  "tags": eight-axis fixed taxonomy object\n'
+    '}'
+)
+
+
+LOCATION_CARD_JSON_SHAPE = (
+    '{\n'
+    '  "canonical_name": location official name,\n'
+    '  "aliases": [usable alternate names],\n'
+    '  "base_summary": "2-4 stable Traditional Chinese scene-description sentences",\n'
+    '  "sensory_anchors": [smell, sound, temperature, light, texture anchors],\n'
+    '  "visual_landmarks": [repeatable visual landmarks],\n'
+    '  "interactive_features": [environmental things players can naturally interact with],\n'
+    '  "discoverables": [non-numeric clues that exploration might reveal],\n'
+    '  "hazards": [non-numeric danger hints, no DCs or damage],\n'
+    '  "soft_hooks": [scene hooks that can guide the next action],\n'
+    '  "exits_hint": [narrative connections to known paths or directions],\n'
+    '  "mood": overall atmosphere,\n'
+    '  "terrain_modifier": 1.0  // travel speed multiplier: 1 normal, <1 rough, >1 easy\n'
     '}'
 )

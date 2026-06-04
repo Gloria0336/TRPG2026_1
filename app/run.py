@@ -21,7 +21,7 @@ log = get_logger("run")
 
 from .db import store
 from .discord_bot.bot import bot
-from .state import game_state
+from .state import campaigns, game_state
 from .web.app import app as web_app
 from .web.portal_app import app as portal_app
 
@@ -58,8 +58,11 @@ async def main() -> None:
         print(f"\n[run] 已有另一個實例在執行中 (pid={exc.pid})，拒絕重複啟動。請先關閉它再重跑。")
         return
 
-    # Open the SQLite memory store (entities / event history / dynamic summaries).
-    store.init_db()
+    # Open the latest per-campaign SQLite store (entities / event history / summaries),
+    # migrating a pre-refactor single save into a campaign directory on first run.
+    campaigns.migrate_legacy_if_needed()
+    if campaigns.resume_latest() is None:
+        store.init_db()
 
     # Resume a saved session so the dashboard isn't blank on restart.
     if game_state.get_state() is None:

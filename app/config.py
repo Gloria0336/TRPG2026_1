@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Discord
     discord_token: str = ""
     discord_guild_id: str = ""
+    discord_allowed_channel_ids: str = ""
     discord_oauth_client_id: str = ""
     discord_oauth_client_secret: str = ""
     discord_oauth_redirect_uri: str = ""
@@ -74,6 +75,13 @@ class Settings(BaseSettings):
     # it at a temp file; the DB layer reopens when this changes.
     db_path: Path = SAVE_DIR / "world.db"
 
+    # Per-campaign storage (案 A). Each campaign gets its own directory under
+    # campaigns_dir holding world.db + session.json + meta.json, so runtime data never
+    # pollutes the authored starter content. Retention keeps only the newest
+    # `max_finished_campaigns` FINISHED campaigns; in-progress dirs are not counted.
+    campaigns_dir: Path = SAVE_DIR / "campaigns"
+    max_finished_campaigns: int = 10
+
     @field_validator("dice_seed", mode="before")
     @classmethod
     def blank_dice_seed_means_random(cls, value: object) -> object:
@@ -112,6 +120,14 @@ class Settings(BaseSettings):
             for origin in self.web_cors_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def parsed_discord_allowed_channel_ids(self) -> set[int]:
+        return {
+            int(channel_id.strip())
+            for channel_id in self.discord_allowed_channel_ids.split(",")
+            if channel_id.strip()
+        }
 
 
 settings = Settings()

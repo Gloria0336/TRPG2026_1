@@ -29,7 +29,7 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # one source of truth; app/ai/schemas.py imports these for the validated LLM output.
 ENTITY_KINDS = ("person", "object", "location", "creature")
 ENTITY_STATUSES = ("present", "departed", "hidden", "dead", "destroyed", "unknown")
-DISPOSITIONS = ("friendly", "neutral", "wary", "afraid", "hostile", "cowed")
+DISPOSITIONS = ("friendly", "neutral", "wary", "afraid", "hostile", "attack", "cowed")
 
 # Entities the narrator should NOT treat as "in the scene right now".
 _ABSENT_STATUSES = {"departed", "dead", "destroyed"}
@@ -59,6 +59,7 @@ def init_db(path: str | Path | None = None) -> None:
         _conn = sqlite3.connect(target, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
         _conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        _seed_vehicle_types(_conn)
         _conn.commit()
         _conn_path = target
         log.info("db: initialized at %s", target)
@@ -69,6 +70,13 @@ def _c() -> sqlite3.Connection:
         init_db()
     assert _conn is not None
     return _conn
+
+
+def _seed_vehicle_types(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO vehicle_types (type, modifier) VALUES (?, ?)",
+        ("horse", 2.0),
+    )
 
 
 def close() -> None:
@@ -84,6 +92,7 @@ def reset_world() -> None:
     """Wipe all continuity tables — used when a fresh campaign starts (/start)."""
     with _lock:
         c = _c()
+        c.execute("DELETE FROM location_cards")
         c.execute("DELETE FROM entities")
         c.execute("DELETE FROM scene_state")
         c.execute("DELETE FROM event_log")
@@ -358,6 +367,29 @@ def upsert_entity(
         c.commit()
 
 
+def merge_entity_flags(ent_id: str, updates: dict | None = None, *, remove: list[str] | None = None) -> dict | None:
+    """Merge a small patch into an entity's JSON flags and return the saved flags."""
+    ent = get_entity_by_id(ent_id)
+    if ent is None:
+        return None
+    flags = dict(ent.get("flags") or {})
+    for key, value in (updates or {}).items():
+        if value is None:
+            flags.pop(key, None)
+        else:
+            flags[key] = value
+    for key in remove or []:
+        flags.pop(key, None)
+    upsert_entity(
+        id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
+        aliases=ent.get("aliases", []), status=ent["status"],
+        location_id=ent.get("location_id"), disposition=ent.get("disposition"),
+        flags=flags, notes=ent.get("notes", ""),
+        first_seen_event_id=ent.get("first_seen_event_id"),
+    )
+    return flags
+
+
 def seed_entities(scene_id: str, defs: list[dict]) -> None:
     """Register a scene's authored entities. Only inserts ones not already present,
     so runtime state survives a scene revisit."""
@@ -415,6 +447,21 @@ def get_entity_by_id(ent_id: str) -> dict | None:
     return _entity_to_dict(row) if row else None
 
 
+def transiting_entities() -> list[dict]:
+    """Entities currently scoped to a connection and carrying flags.transit."""
+    with _lock:
+        c = _c()
+        rows = c.execute(
+            "SELECT * FROM entities WHERE flags LIKE ? ORDER BY created_ts",
+            ('%"transit"%',),
+        ).fetchall()
+    entities = [_entity_to_dict(r) for r in rows]
+    return [
+        e for e in entities
+        if isinstance((e.get("flags") or {}).get("transit"), dict)
+    ]
+
+
 def get_locations() -> list[dict]:
     """The global location registry (all kind='location' entities, any scope)."""
     with _lock:
@@ -455,21 +502,32 @@ def register_location(name: str, *, location_id: str | None = None,
     return get_entity_by_id(ent_id)  # type: ignore[return-value]
 
 
+# Keys that shape the hierarchical world graph; stored under entity flags so SQLite needs
+# no schema change (a later Postgres pass can split them into columns). See scenario.LOCATIONS.
+_GRAPH_FLAG_KEYS = (
+    "loc_type", "parent", "connects", "travel_cost", "danger",
+    "required_rank", "gate", "gate_reason", "biome", "controlling_faction",
+    "distances", "terrain_modifier", "movement_base", "is_vehicle", "vehicle_type",
+)
+
+
 def seed_locations(defs: list[dict]) -> None:
     """Register a campaign's authored locations once (id-stable, insert-only) so travel
-    resolves to canonical ids instead of forking ad-hoc duplicates."""
+    resolves to canonical ids instead of forking ad-hoc duplicates. Carries the
+    hierarchical-world-graph fields (loc_type / parent / connects / travel_cost / danger …)
+    into flags so pathfinding and the access gate can read them."""
     for d in defs:
         if d.get("id") and get_entity_by_id(d["id"]):
             continue
-        adjacency: dict = {}
-        if d.get("connects"):
-            adjacency["connects"] = list(d["connects"])
-        if d.get("parent"):
-            adjacency["parent"] = d["parent"]
+        flags = {k: d[k] for k in _GRAPH_FLAG_KEYS if d.get(k) is not None}
+        if isinstance(flags.get("connects"), list):
+            flags["connects"] = list(flags["connects"])
+        if isinstance(flags.get("distances"), dict):
+            flags["distances"] = dict(flags["distances"])
         register_location(
             d["name"], location_id=d.get("id"),
             aliases=d.get("aliases", []), notes=d.get("notes", ""),
-            flags=adjacency or None,
+            flags=flags or None,
         )
 
 
@@ -483,13 +541,32 @@ def move_entity(ent_id: str, dest_location_id: str) -> bool:
     dest = get_entity_by_id(dest_location_id) or find_location(dest_location_id)
     if not dest or dest.get("kind") != "location":
         return False
+    flags = dict(ent.get("flags") or {})
+    flags.pop("transit", None)
     upsert_entity(
         id=ent["id"], scene_id=dest["id"], kind=ent["kind"], name=ent["name"],
         aliases=ent.get("aliases", []), status=ent["status"], location_id=dest["id"],
-        disposition=ent.get("disposition"), flags=ent.get("flags", {}),
+        disposition=ent.get("disposition"), flags=flags,
         notes=ent.get("notes", ""), first_seen_event_id=ent.get("first_seen_event_id"),
     )
     return True
+
+
+def vehicle_modifier(vehicle_type: str | None) -> float:
+    if not vehicle_type:
+        return 1.0
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT modifier FROM vehicle_types WHERE type=?",
+            (str(vehicle_type),),
+        ).fetchone()
+    if row is None:
+        return 1.0
+    try:
+        return float(row["modifier"])
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def resolve_or_register_location(ref: str) -> dict | None:
@@ -500,6 +577,98 @@ def resolve_or_register_location(ref: str) -> dict | None:
     if not ref or not ref.strip():
         return None
     return find_location(ref) or register_location(ref.strip())
+
+
+# ───────────────────────── hierarchical world graph (design §6) ─────────────────────────
+def _neighbor_ids(loc_id: str, by_id: dict[str, dict]) -> list[str]:
+    """Immediate graph neighbours of a location, in a DETERMINISTIC order so pathfinding
+    is reproducible: lateral `connects` (declared order) → children (registry order) → parent.
+    Edges are bidirectional in the data (connects declared symmetrically; child↔parent both
+    covered here), so callers need not synthesise reverse edges."""
+    here = by_id.get(loc_id)
+    if not here:
+        return []
+    flags = here.get("flags") or {}
+    out: list[str] = list(flags.get("connects") or [])
+    out += [lid for lid, loc in by_id.items()
+            if (loc.get("flags") or {}).get("parent") == loc_id]
+    parent = flags.get("parent")
+    if parent:
+        out.append(parent)
+    seen: set[str] = set()
+    res: list[str] = []
+    for nid in out:
+        if nid and nid != loc_id and nid in by_id and nid not in seen:
+            seen.add(nid)
+            res.append(nid)
+    return res
+
+
+def travel_options(loc_id: str) -> list[dict]:
+    """Locations one hop from `loc_id` in the world graph (parent / children / connects),
+    as entity dicts. Drives the AI's known exits and any 'where can I go' UI."""
+    by_id = {l["id"]: l for l in get_locations()}
+    return [by_id[nid] for nid in _neighbor_ids(loc_id, by_id)]
+
+
+def travel_path(src_id: str, dst_id: str) -> list[str] | None:
+    """Shortest node path through the world graph from `src_id` to `dst_id`, EXCLUDING the
+    source and INCLUDING the destination. [] if already there; None if either id is unknown
+    or the two are in disconnected components. Hop-count BFS — travel_cost is applied per
+    traversed node by the caller (so distant places cost time but stay reachable, no teleport)."""
+    by_id = {l["id"]: l for l in get_locations()}
+    if src_id not in by_id or dst_id not in by_id:
+        return None
+    if src_id == dst_id:
+        return []
+    prev: dict[str, str | None] = {src_id: None}
+    queue: list[str] = [src_id]
+    head = 0
+    while head < len(queue):
+        cur = queue[head]
+        head += 1
+        if cur == dst_id:
+            break
+        for nb in _neighbor_ids(cur, by_id):
+            if nb not in prev:
+                prev[nb] = cur
+                queue.append(nb)
+    if dst_id not in prev:
+        return None
+    path: list[str] = []
+    node: str | None = dst_id
+    while node is not None and node != src_id:
+        path.append(node)
+        node = prev[node]
+    path.reverse()
+    return path
+
+
+def location_access(loc_id: str) -> dict:
+    """Access gate for ENTERING a location (design §12 region gating, mixed policy).
+    Pure data read — the caller decides messaging. Returns
+    {gate: free|soft|hard, danger: int, required_rank: str|None, reason: str}.
+    `required_rank` or explicit gate='hard' hard-blocks; danger≥3 (or gate='soft') soft-warns;
+    otherwise free. (MVP has no guild rank, so any required_rank currently hard-blocks.)"""
+    loc = get_entity_by_id(loc_id)
+    flags = (loc or {}).get("flags") or {}
+    danger = int(flags.get("danger") or 0)
+    req = flags.get("required_rank")
+    explicit = flags.get("gate")
+    reason = str(flags.get("gate_reason") or "")
+    if explicit == "hard" or req:
+        return {"gate": "hard", "danger": danger, "required_rank": req, "reason": reason}
+    if explicit == "soft" or danger >= 3:
+        return {"gate": "soft", "danger": danger, "required_rank": None, "reason": reason}
+    return {"gate": "free", "danger": danger, "required_rank": None, "reason": reason}
+
+
+def location_travel_cost(loc_id: str) -> int:
+    """Day-stages spent entering `loc_id` (default 1; authored 0 for in-town hops)."""
+    loc = get_entity_by_id(loc_id)
+    flags = (loc or {}).get("flags") or {}
+    raw = flags.get("travel_cost")
+    return int(raw) if isinstance(raw, (int, float)) else 1
 
 
 # ───────────────────────── mention tally (debounced auto-register) ─────────────────────────
@@ -863,3 +1032,133 @@ def get_scene_state(scene_id: str) -> dict | None:
         c = _c()
         row = c.execute("SELECT * FROM scene_state WHERE scene_id=?", (scene_id,)).fetchone()
     return dict(row) if row else None
+
+
+# ───────────────────────── location cards ─────────────────────────
+_LOCATION_CARD_LIST_FIELDS = (
+    "aliases",
+    "sensory_anchors",
+    "visual_landmarks",
+    "interactive_features",
+    "discoverables",
+    "hazards",
+    "soft_hooks",
+    "exits_hint",
+)
+
+
+def _location_card_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    d = dict(row)
+    for key in _LOCATION_CARD_LIST_FIELDS:
+        try:
+            d[key] = json.loads(d.get(key) or "[]")
+        except json.JSONDecodeError:
+            d[key] = []
+    return d
+
+
+def upsert_location_card(
+    *,
+    location_id: str,
+    canonical_name: str,
+    aliases: list[str] | None = None,
+    base_summary: str = "",
+    sensory_anchors: list[str] | None = None,
+    visual_landmarks: list[str] | None = None,
+    interactive_features: list[str] | None = None,
+    discoverables: list[str] | None = None,
+    hazards: list[str] | None = None,
+    soft_hooks: list[str] | None = None,
+    exits_hint: list[str] | None = None,
+    mood: str = "",
+    generated_source: str = "",
+    generated_ts: float | None = None,
+) -> None:
+    """Store stable exploration and description anchors for one location."""
+    now = _now()
+    gen_ts = generated_ts or now
+    lists = {
+        "aliases": aliases or [],
+        "sensory_anchors": sensory_anchors or [],
+        "visual_landmarks": visual_landmarks or [],
+        "interactive_features": interactive_features or [],
+        "discoverables": discoverables or [],
+        "hazards": hazards or [],
+        "soft_hooks": soft_hooks or [],
+        "exits_hint": exits_hint or [],
+    }
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT location_id FROM location_cards WHERE location_id=?", (location_id,)
+        ).fetchone()
+        values = (
+            canonical_name,
+            json.dumps(lists["aliases"], ensure_ascii=False),
+            base_summary,
+            json.dumps(lists["sensory_anchors"], ensure_ascii=False),
+            json.dumps(lists["visual_landmarks"], ensure_ascii=False),
+            json.dumps(lists["interactive_features"], ensure_ascii=False),
+            json.dumps(lists["discoverables"], ensure_ascii=False),
+            json.dumps(lists["hazards"], ensure_ascii=False),
+            json.dumps(lists["soft_hooks"], ensure_ascii=False),
+            json.dumps(lists["exits_hint"], ensure_ascii=False),
+            mood,
+            generated_source,
+            gen_ts,
+            now,
+        )
+        if row:
+            c.execute(
+                "UPDATE location_cards SET canonical_name=?, aliases=?, base_summary=?, "
+                "sensory_anchors=?, visual_landmarks=?, interactive_features=?, "
+                "discoverables=?, hazards=?, soft_hooks=?, exits_hint=?, mood=?, "
+                "generated_source=?, generated_ts=?, updated_ts=? WHERE location_id=?",
+                (*values, location_id),
+            )
+        else:
+            c.execute(
+                "INSERT INTO location_cards (location_id, canonical_name, aliases, "
+                "base_summary, sensory_anchors, visual_landmarks, interactive_features, "
+                "discoverables, hazards, soft_hooks, exits_hint, mood, generated_source, "
+                "generated_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (location_id, *values),
+            )
+        c.commit()
+
+
+def get_location_card(location_id: str) -> dict | None:
+    if not location_id:
+        return None
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT * FROM location_cards WHERE location_id=?", (location_id,)
+        ).fetchone()
+    return _location_card_to_dict(row)
+
+
+def locations_missing_cards() -> list[dict]:
+    with _lock:
+        c = _c()
+        rows = c.execute(
+            "SELECT e.* FROM entities e "
+            "LEFT JOIN location_cards lc ON lc.location_id=e.id "
+            "WHERE e.kind='location' AND lc.location_id IS NULL "
+            "ORDER BY e.created_ts"
+        ).fetchall()
+    return [_entity_to_dict(r) for r in rows]
+
+
+def clear_mention(scene_id: str | None, name: str) -> None:
+    if not name or not name.strip():
+        return
+    with _lock:
+        c = _c()
+        c.execute(
+            "DELETE FROM mention_tally WHERE scene_id IS ? AND norm_name=?",
+            (scene_id, name.strip().lower()),
+        )
+        c.commit()

@@ -27,23 +27,117 @@ HOW_TO_PLAY = (
 # travel resolves to canonical places — and traveling to one that is also a scripted
 # scene re-enters that scene with its full content (challenges/encounter/entities).
 # Emergent places the players invent are auto-registered by store.resolve_or_register_location.
-# `connects`/`parent` give travel a shape (design §6: location is first-class). The party
-# can only reach adjacent places from here; `parent` is the larger area a place sits inside
-# (so "leave the tavern" goes out to the village, not to a random far location). Emergent
-# places carry no adjacency and stay freely reachable (see prompts.known_exits fallback).
+#
+# This is a HIERARCHICAL WORLD GRAPH (design §6 location hierarchy):
+#   • `loc_type` — region › settlement › venue / wilds / interior. Gives the graph levels.
+#   • `parent`   — containment (a venue sits inside a settlement, a settlement inside a region).
+#                  Vertical parent↔child edges are implicit and bidirectional (enter / exit).
+#   • `connects` — lateral edges, normally between siblings sharing a parent. Declare them
+#                  symmetrically (if A connects B, B connects A) so travel routes both ways.
+#   • `travel_cost` — day-stages spent ENTERING this node (default 1; 0 for in-town hops so
+#                  stepping out of the tavern is instant, while heading into the wilds burns time).
+#   • `danger`   — 0 safe … 5 lethal. ≥3 soft-gates entry (warn, proceed; design §12 default).
+#   • `required_rank` / `gate="hard"` — hard-gate entry (block). Reserved for future danger
+#                  zones; the MVP scenario uses none so the climax stays reachable.
+# Travel pathfinds over this graph (store.travel_path): non-adjacent targets are reached by
+# routing THROUGH intermediate nodes (no teleport), accumulating travel_cost. Emergent places
+# the players invent carry no adjacency and stay freely reachable.
+# Each entry also carries an authored `card` — the stable sensory/description skin the
+# narrator reads. Pre-authoring it (instead of generating it from the LLM at /start) keeps
+# new-game latency flat: ensure_seed_location_cards persists these directly, skipping the
+# per-location AI round-trip. Emergent player-invented places still get an AI-built card.
+# Card fields mirror ai.schemas.LocationCard; `terrain_modifier` here is authoritative and
+# must match the structural value above so the card upsert doesn't drift the travel cost.
 LOCATIONS: list[dict] = [
+    {"id": "frontier", "name": "晨橋邊境", "aliases": ["邊境", "這一帶", "周邊地帶"],
+     "loc_type": "region", "travel_cost": 0,
+     "distances": {"morningbridge": 1, "east_road": 5, "warren": 15},
+     "notes": "晨橋村及其周邊的邊境地帶——村莊、東路與哥布林盤踞的山坡都屬此區。",
+     "card": {
+         "base_summary": "晨橋邊境是一片靜默的邊陲谷地：南邊炊煙裊裊的晨橋村，東路沿河谷沒入林線，"
+                         "北側山坡的裂隙裡盤踞著哥布林。",
+         "sensory_anchors": ["河水奔流的低響", "濕冷貼地的晨霧", "林木與濕泥的氣味"],
+         "visual_landmarks": ["橫跨湍流的晨橋", "向東沒入森林的大路", "北面裸露的岩石山坡"],
+         "interactive_features": ["路邊的里程石", "可遠眺四方的高地"],
+         "discoverables": ["各村落與道路之間的相對方位", "近日往來商旅的蹤跡"],
+         "hazards": ["離開村莊後逐漸逼近的哥布林威脅"],
+         "soft_hooks": ["可前往晨橋村補給、沿東路追查，或遠望北方山坡"],
+         "exits_hint": ["晨橋村", "東路", "哥布林巢穴"],
+         "mood": "遼闊、靜謐、暗藏威脅",
+         "terrain_modifier": 1.0,
+     }},
     {"id": "morningbridge", "name": "晨橋村", "aliases": ["鎮上", "村子", "村莊", "晨橋"],
+     "loc_type": "settlement", "parent": "frontier", "travel_cost": 0,
+     "distances": {"frontier": 1, "tavern": 0.2, "east_road": 5},
      "notes": "寧靜的邊境村莊；鎏金酒杯酒館與往東的大路都在這裡。",
-     "connects": ["tavern", "east_road"]},
+     "connects": ["east_road"],
+     "card": {
+         "base_summary": "晨橋村是一座寧靜的邊境小村，木屋沿河岸聚攏；鎏金酒杯酒館的燈火與往東的大路都從這裡開始。",
+         "sensory_anchors": ["河水拍打橋墩的聲音", "炊煙與烤麵包香", "泥土小徑的踩踏聲"],
+         "visual_landmarks": ["鎏金酒杯酒館的招牌", "橫跨河川的木橋", "村口往東的路標"],
+         "interactive_features": ["村中的告示板", "井邊閒談的村民"],
+         "discoverables": ["商隊失蹤的鄉里傳聞", "民兵不願出動搜救的緣由"],
+         "hazards": [],
+         "soft_hooks": ["可進酒館打聽、向村民攀談，或沿東路出發"],
+         "exits_hint": ["鎏金酒杯酒館", "東路"],
+         "mood": "寧靜、溫暖、略帶不安",
+         "terrain_modifier": 1.0,
+     }},
     {"id": "tavern", "name": "鎏金酒杯酒館", "aliases": ["酒館", "鎏金酒杯", "鎏金酒杯酒館"],
+     "loc_type": "venue", "parent": "morningbridge", "travel_cost": 0,
+     "distances": {"morningbridge": 0.2},
      "notes": "晨橋村熱鬧的酒館，冒險的起點。",
-     "parent": "morningbridge", "connects": ["morningbridge", "east_road"]},
+     "card": {
+         "base_summary": "鎏金酒杯酒館燈火通明、人聲鼎沸，是冒險的起點；焦急的商人老佩林在此求助，"
+                         "角落還坐著一名偷瞄他的兜帽客。",
+         "sensory_anchors": ["爐火劈啪作響", "麥酒與烤肉的香氣", "壓低嗓音的交談與杯盤碰撞"],
+         "visual_landmarks": ["燃著爐火的壁爐", "酒保擦拭酒杯的吧台", "光線昏暗的角落座位"],
+         "interactive_features": ["可請人喝酒攀談的吧台", "可旁聽的鄰桌", "張貼委託的牆面"],
+         "discoverables": ["商隊原訂的去向與路線", "角落兜帽客的可疑舉動", "民兵推託搜救的內情"],
+         "hazards": [],
+         "soft_hooks": ["可與老佩林深談、留意兜帽客，或接下委託動身"],
+         "exits_hint": ["晨橋村"],
+         "mood": "熱鬧、溫暖、暗流湧動",
+         "terrain_modifier": 1.0,
+     }},
     {"id": "east_road", "name": "東路", "aliases": ["東邊道路", "大路", "東面道路"],
+     "loc_type": "wilds", "parent": "frontier", "travel_cost": 1,
+     "distances": {"frontier": 5, "morningbridge": 5, "warren": 10},
+     "terrain_modifier": 0.9,
      "notes": "晨橋村往東的道路，商隊失蹤之處。",
-     "parent": "morningbridge", "connects": ["morningbridge", "tavern", "warren"]},
+     "connects": ["morningbridge", "warren"],
+     "card": {
+         "base_summary": "東路在晨霧中逐漸收窄沒入森林，路上留著兩輛翻覆的貨車、散落的箱子與深色血跡；"
+                         "足跡離開道路通往北面山坡，前方小徑還有一條反光的絆線。",
+         "sensory_anchors": ["貼地不散的晨霧", "潮濕泥土與鐵鏽血腥味", "林間鳥獸的零星聲響"],
+         "visual_landmarks": ["兩輛翻覆的貨車", "離開路面的粗糙足跡", "小徑上微微反光的絆線"],
+         "interactive_features": ["可翻找的貨車與散箱", "可追蹤的足跡", "可拆解或迴避的陷阱"],
+         "discoverables": ["襲擊者是哥布林的線索", "幾乎不見屍體的蹊蹺", "通往巢穴的路徑"],
+         "hazards": ["小徑上隱蔽的絆線陷阱", "脫離道路後逼近的伏擊"],
+         "soft_hooks": ["可搜索貨車、循足跡追查，或先解除絆線"],
+         "exits_hint": ["晨橋村", "哥布林巢穴"],
+         "mood": "陰冷、警戒、不祥",
+         "terrain_modifier": 0.9,
+     }},
     {"id": "warren", "name": "哥布林巢穴", "aliases": ["巢穴", "哥布林窩", "山坡裂隙"],
+     "loc_type": "wilds", "parent": "frontier", "travel_cost": 1, "danger": 3,
+     "distances": {"frontier": 15, "east_road": 10},
+     "terrain_modifier": 0.7,
      "notes": "山坡裂隙後、煙霧瀰漫的哥布林巢穴。",
-     "connects": ["east_road"]},
+     "connects": ["east_road"],
+     "card": {
+         "base_summary": "哥布林巢穴藏在山坡裂隙之後，煙霧瀰漫、惡臭撲鼻；深處哥布林首領葛利克斯正用刀"
+                         "挾持一名商隊護衛，身旁還有一名副手。",
+         "sensory_anchors": ["嗆人的木煙與哥布林臭味", "深處傳來的低吼與騷動", "滴水聲與晃動的火光"],
+         "visual_landmarks": ["冒著煙的山坡裂隙入口", "狹窄曲折的洞道", "首領盤踞的內穴"],
+         "interactive_features": ["可潛行繞行的陰影", "可談判或威嚇的對象", "可掩護移動的岩柱"],
+         "discoverables": ["人質的位置與狀態", "巢穴的退路", "首領的弱點與動機"],
+         "hazards": ["挾持人質的哥布林首領與副手", "狹道中的伏擊與火煙"],
+         "soft_hooks": ["可正面開戰、出言談判，或潛行救出人質"],
+         "exits_hint": ["東路"],
+         "mood": "壓迫、危險、緊繃",
+         "terrain_modifier": 0.7,
+     }},
 ]
 
 # Per-scene cost pools (design §4.7). When a check lands in PARTIAL or FAILURE the
@@ -69,20 +163,21 @@ SCENES: list[dict] = [
                 "aliases": ["佩林", "老佩林（商人）", "商人"],
                 "status": "present", "disposition": "friendly",
                 "notes": "焦急的商人；商隊三天前在東路失蹤，懸賞 50 金幣。",
+                "flags": {"movement_base": 2},
             },
             {
                 "id": "ent_hooded", "kind": "person", "name": "緊張的兜帽客",
                 "aliases": ["兜帽客", "兜帽人", "神秘人", "兜帽客人"],
                 "status": "present", "disposition": "afraid",
                 "notes": "坐在角落，不時偷瞄佩林。",
-                "flags": {"agenda": "暗中監視佩林，怕商隊真相被查出；情勢不對就設法溜走"},
+                "flags": {"agenda": "暗中監視佩林，怕商隊真相被查出；情勢不對就設法溜走", "movement_base": 5},
             },
         ],
         "challenges": {
-            "persuasion": 15,
-            "insight": 15,
-            "perception": 15,
-            "intimidation": 15,
+            "persuasion": 11,
+            "insight": 10,
+            "perception": 13,
+            "intimidation": 12,
         },
         "cost_pool": ["relation", "attention", "time"],
         "onboarding": [

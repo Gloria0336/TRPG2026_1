@@ -137,6 +137,9 @@ class Character:
     hp: int
     ac: int
     speed: int = 30
+    movement_base: float = 4.0
+    is_vehicle: bool = False
+    vehicle_type: str | None = None
     # skill name -> "prof" | "expertise"  (absent = not proficient)
     skill_prof: dict[str, str] = field(default_factory=dict)
     save_prof: list[str] = field(default_factory=list)  # proficient saving-throw abilities
@@ -360,6 +363,10 @@ class ResolutionResult:
     dc_base: int | None = None
     dc_env_modifier: int | None = None
     dc_env_reason: str | None = None
+    # Deterministic disposition offset applied to social checks against a dispositioned
+    # NPC (design: 態度數值化). None for non-social checks or targets without a disposition.
+    dc_npc_modifier: int | None = None
+    dc_npc_disposition: str | None = None
     roll_breakdown: str | None = None  # human-readable dice breakdown for the embed
     natural: int | None = None
     crit: bool = False
