@@ -12,8 +12,17 @@ if TYPE_CHECKING:
 
 
 DEFAULT_EDGE_DISTANCE_KM = 5.0
+CONTAINMENT_DISTANCE_KM = 0.0
+CONTAINMENT_TIME_MIN = 1.0
 DEFAULT_MOVEMENT_BASE_KMH = 4.0
 TRANSIT_FLAG = "transit"
+
+_LATERAL_DEFAULTS = {
+    ("venue", "venue"): 0.3,
+    ("settlement", "settlement"): 8.0,
+    ("settlement", "wilds"): 5.0,
+    ("wilds", "wilds"): 8.0,
+}
 
 
 def _flags(unit: object) -> dict:
@@ -107,7 +116,7 @@ def parse_connection(cid: str) -> tuple[str, str] | None:
     return (a, b) if a and b else None
 
 
-def edge_distance(a: str, b: str) -> float:
+def _authored_distance(a: str, b: str) -> float | None:
     for src, dst in ((a, b), (b, a)):
         loc = store.get_entity_by_id(src)
         flags = (loc or {}).get("flags") or {}
@@ -116,7 +125,44 @@ def edge_distance(a: str, b: str) -> float:
             parsed = _float_or_none(distances.get(dst))
             if parsed is not None and parsed >= 0:
                 return parsed
-    return DEFAULT_EDGE_DISTANCE_KM
+    return None
+
+
+def edge_kind(a: str, b: str) -> str:
+    loc_a = store.get_entity_by_id(a)
+    loc_b = store.get_entity_by_id(b)
+    flags_a = (loc_a or {}).get("flags") or {}
+    flags_b = (loc_b or {}).get("flags") or {}
+    if flags_a.get("parent") == b or flags_b.get("parent") == a:
+        return "containment"
+    return "lateral"
+
+
+def _lateral_default_km(a: str, b: str) -> float:
+    loc_a = store.get_entity_by_id(a)
+    loc_b = store.get_entity_by_id(b)
+    flags_a = (loc_a or {}).get("flags") or {}
+    flags_b = (loc_b or {}).get("flags") or {}
+    type_a = flags_a.get("loc_type")
+    type_b = flags_b.get("loc_type")
+    if type_a == "region" or type_b == "region":
+        return 15.0
+    key = tuple(sorted((str(type_a or ""), str(type_b or ""))))
+    return _LATERAL_DEFAULTS.get(key, DEFAULT_EDGE_DISTANCE_KM)
+
+
+def edge_distance(a: str, b: str) -> float:
+    authored = _authored_distance(a, b)
+    if edge_kind(a, b) == "containment":
+        return authored if authored is not None else CONTAINMENT_DISTANCE_KM
+    return authored if authored is not None else _lateral_default_km(a, b)
+
+
+def edge_time_hours(a: str, b: str, speed_kmh: float) -> float:
+    km = edge_distance(a, b)
+    if edge_kind(a, b) == "containment" and km <= 0:
+        return CONTAINMENT_TIME_MIN / 60.0
+    return movement_math.travel_time_hours(km, speed_kmh)
 
 
 def start_transit(
@@ -132,7 +178,10 @@ def start_transit(
         return None
     distance_km = edge_distance(from_id, to_id)
     speed = unit_speed(ent, to_id)
-    time_h = movement_math.travel_time_hours(distance_km, speed)
+    time_h = edge_time_hours(from_id, to_id, speed)
+    if edge_kind(from_id, to_id) == "containment" and distance_km <= 0:
+        store.move_entity(entity_id, to_id)
+        return store.get_entity_by_id(entity_id)
     depart = int(round(float(now_minutes)))
     arrival = depart + int(math.ceil(time_h * 60))
     conn_id = connection_id(from_id, to_id)
@@ -205,6 +254,8 @@ def position_label(entity: dict) -> str:
         dest = _location_name(str(transit.get("to") or ""))
         distance = _float_or_none(transit.get("distance_km")) or 0.0
         time_h = _float_or_none(transit.get("time_h")) or 0.0
+        if distance <= 0 or time_h <= 0:
+            return f"在 {src} 前往 {dest} 的路上"
         return f"在 {src} 前往 {dest} 的路上（約 {_fmt(distance)} km、{_fmt(time_h)} 小時）"
     loc_id = entity.get("location_id") or entity.get("scene_id")
     return _location_name(str(loc_id)) if loc_id else ""

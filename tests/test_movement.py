@@ -78,7 +78,7 @@ def test_party_travel_plan_uses_distance_and_minutes():
     plan = discord_bot._plan_travel("tavern", "warren", gs.pcs())
 
     assert plan["traversed"] == ["morningbridge", "east_road", "warren"]
-    assert plan["distance_km"] == pytest.approx(15.2)
+    assert plan["distance_km"] == pytest.approx(15.0)
     assert plan["time_h"] > 0
 
     start = gs.world_minutes()
@@ -93,3 +93,85 @@ def test_seeded_edge_distance_and_unit_speed_read_location_flags():
     assert world_movement.edge_distance("east_road", "warren") == pytest.approx(10.0)
     thief = {"flags": {"movement_base": 5}}
     assert world_movement.unit_speed(thief, "warren") == pytest.approx(3.5)
+
+
+def test_edge_kind_classifies_containment_and_lateral():
+    game_state.reset_state(channel_id=0)
+
+    assert world_movement.edge_kind("tavern", "morningbridge") == "containment"
+    assert world_movement.edge_kind("morningbridge", "tavern") == "containment"
+    assert world_movement.edge_kind("morningbridge", "east_road") == "lateral"
+
+
+def test_edge_distance_zeroes_containment_when_unauthored():
+    game_state.reset_state(channel_id=0)
+
+    assert world_movement.edge_distance("tavern", "morningbridge") == pytest.approx(0.0)
+
+
+def test_edge_distance_containment_honours_authored():
+    store.register_location("Parent", location_id="parent", flags={"loc_type": "settlement"})
+    store.register_location(
+        "Child",
+        location_id="child",
+        flags={"loc_type": "venue", "parent": "parent", "distances": {"parent": 0.4}},
+    )
+
+    assert world_movement.edge_kind("child", "parent") == "containment"
+    assert world_movement.edge_distance("child", "parent") == pytest.approx(0.4)
+
+
+def test_edge_distance_lateral_honours_authored():
+    game_state.reset_state(channel_id=0)
+
+    assert world_movement.edge_distance("east_road", "warren") == pytest.approx(10.0)
+
+
+def test_lateral_default_when_unauthored():
+    store.register_location("Kitchen", location_id="kitchen", flags={"loc_type": "venue"})
+    store.register_location("Cellar", location_id="cellar", flags={"loc_type": "venue"})
+
+    assert world_movement.edge_kind("kitchen", "cellar") == "lateral"
+    assert world_movement.edge_distance("kitchen", "cellar") == pytest.approx(0.3)
+
+
+def test_leave_venue_costs_no_distance_and_one_minute():
+    gs = game_state.reset_state(channel_id=0)
+    plan = discord_bot._plan_travel("tavern", "morningbridge", gs.pcs())
+
+    assert plan["distance_km"] == pytest.approx(0.0)
+    assert plan["time_h"] == pytest.approx(1 / 60)
+
+
+def test_travel_notice_suppresses_distance_for_containment():
+    gs = game_state.reset_state(channel_id=0)
+    plan = discord_bot._plan_travel("tavern", "morningbridge", gs.pcs())
+
+    notice = discord_bot._travel_notice(plan)
+
+    assert "路程約" not in notice
+    assert "你走出了" in notice
+
+
+def test_start_transit_containment_is_instant():
+    store.register_location("Village", location_id="village", flags={"loc_type": "settlement"})
+    store.register_location(
+        "Tavern",
+        location_id="tavern",
+        flags={"loc_type": "venue", "parent": "village"},
+    )
+    store.upsert_entity(
+        id="ent_runner",
+        scene_id="tavern",
+        kind="person",
+        name="Runner",
+        location_id="tavern",
+        flags={"movement_base": 5},
+    )
+
+    ent = world_movement.start_transit("ent_runner", "tavern", "village", 540)
+
+    assert ent is not None
+    assert ent["scene_id"] == "village"
+    assert ent["location_id"] == "village"
+    assert "transit" not in ent["flags"]

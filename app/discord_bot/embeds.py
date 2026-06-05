@@ -91,6 +91,35 @@ def character_embed(c: Character) -> discord.Embed:
         e.add_field(name="動作", value=acts, inline=False)
     if c.conditions:
         e.add_field(name="狀態", value=", ".join(i18n.condition(x) for x in c.conditions), inline=False)
+    try:
+        from ..db import store
+
+        inventory = store.get_inventory(c.id)
+    except Exception:  # noqa: BLE001
+        inventory = []
+    if inventory:
+        labels = {
+            "weapon": "武器",
+            "armor": "護甲",
+            "shield": "盾牌",
+            "consumable": "消耗品",
+            "gear": "裝備",
+            "treasure": "財物",
+            "key_item": "關鍵物品",
+            "misc": "雜物",
+        }
+        grouped: dict[str, list[str]] = {}
+        for item in inventory:
+            qty = int(item.get("quantity") or 1)
+            suffix = f" x{qty}" if qty > 1 else ""
+            equipped = "（已裝備）" if item.get("equipped") else ""
+            grouped.setdefault(item.get("category") or "misc", []).append(
+                f"{item.get('name')}{suffix}{equipped}"
+            )
+        lines = []
+        for category, names in grouped.items():
+            lines.append(f"**{labels.get(category, category)}**：{', '.join(names)}")
+        e.add_field(name="背包", value="\n".join(lines)[:1024], inline=False)
     return e
 
 

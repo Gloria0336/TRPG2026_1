@@ -93,11 +93,12 @@ def test_travel_to_authored_place_keeps_scene_content():
     loc = store.resolve_or_register_location("東路")
     assert loc["id"] == "east_road"
     # The bot bridges authored places back to goto_scene; assert that path restores the
-    # authored challenges (which a bare goto_location would not have).
+    # authored scene content (here the location's cost_pool, which a bare goto_location
+    # would leave empty). challenges were removed from the data — DC is AI-owned now.
     from app.content import scenario
     gs.goto_scene(scenario.scene_by_id(loc["id"]))
     assert gs.current_location_id == "east_road"
-    assert "perception" in gs.scene.challenges
+    assert gs.scene.cost_pool == ["time", "trace", "resource"]
 
 
 # ── Step 3: prompts read as LOCATION-driven, not SCENE-driven ──

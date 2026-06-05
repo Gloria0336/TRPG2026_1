@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from ..ai import orchestrator, prompts
 from ..config import settings
-from ..content import director, scenario
+from ..content import director, monsters, scenario
 from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
@@ -274,6 +274,20 @@ def _is_pc_ref(gs: game_state.GameState, ref: str | None) -> bool:
     return False
 
 
+def _grant_recipient_id(gs: game_state.GameState, ref: str | None, fallback_actor_id: str | None) -> str | None:
+    if ref and ref.strip():
+        t = ref.strip().lower()
+        for c in gs.characters.values():
+            candidates = [c.id, c.name, i18n.name(c.name)]
+            if c.name:
+                candidates.append(c.name.split()[0])
+            for name in candidates:
+                n = (name or "").strip().lower()
+                if n and (t == n or t in n or n in t):
+                    return c.id
+    return fallback_actor_id if fallback_actor_id in gs.characters else None
+
+
 async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) -> None:
     """After each narration: pull entity-state deltas (LLM extraction, offline-safe)
     and apply them, then recompute the dynamic scene summary so the next turn reads
@@ -315,10 +329,51 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                     log.info("entity mention tallied (%d/%d): scope=%s name=%s kind=%s",
                              count, threshold, scope, name, kind)
                 continue
+            # Narrated hostile that the extractor reported WITHOUT a register_kind (the
+            # gpt-4o-mini failure mode behind the "attack didn't start combat" bug): a foe
+            # who just turned on the party must materialise NOW so the next /action can
+            # trigger combat — debouncing it for `threshold` mentions would leave the
+            # engine with no entity to fight. Bypass the tally and register immediately.
+            if existing is None and d.get("disposition") in {"hostile", "attack"}:
+                kind = monsters.infer_combat_kind(ref)
+                ent_id = store.register_combatant(
+                    scope, ref, kind, disposition=d["disposition"],
+                    aliases=d.get("aliases") or [], note=d.get("note") or "",
+                )
+                if ent_id:
+                    log.info("entity auto-registered (narrated hostile, no debounce): "
+                             "scope=%s ref=%s kind=%s id=%s", scope, ref, kind, ent_id)
+                continue
             ent_id = store.apply_delta(scope, d)
             if ent_id:
                 log.info("entity delta applied: scope=%s entity=%s %s",
                          scope, ent_id, delta.model_dump(exclude_none=True))
+        for grant in extraction.acquired_items():
+            recipient_id = _grant_recipient_id(
+                gs,
+                grant.recipient_ref,
+                getattr(result, "actor_id", None),
+            )
+            if not recipient_id:
+                log.info("item grant skipped (no recipient): %s", grant.model_dump(exclude_none=True))
+                continue
+            saved = store.grant_item(
+                recipient_id,
+                grant.item_name,
+                quantity=grant.quantity,
+                category=grant.category,
+                event_id=getattr(result, "event_id", None),
+            )
+            actor = gs.characters.get(recipient_id)
+            if actor:
+                actor.inventory = store.project_inventory(recipient_id)
+            log.info(
+                "item grant applied: actor=%s item=%s qty=%s source=%s",
+                recipient_id,
+                saved.get("name"),
+                saved.get("quantity"),
+                grant.source_ref,
+            )
         # Lasting change to the place itself (not tied to a single entity) → persist on
         # the location so it survives revisits and shows in the dynamic summary.
         if extraction.location_note and store.append_location_state_note(scope, extraction.location_note):
@@ -326,10 +381,15 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                      scope, extraction.location_note[:80])
     except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
         log.warning("entity update failed (%s): %s", type(exc).__name__, exc)
+    # Rolling scene digest: refresh every `rolling_summary_every` beats so plot that has
+    # scrolled out of the event window is still remembered (compose_scene_summary reads
+    # current_summary back). Cadence-gated to keep the extra cheap-model call occasional.
     try:
-        store.set_current_summary(scope, prompts.compose_scene_summary(gs))
+        every = max(1, settings.rolling_summary_every)
+        if settings.rolling_summary_enabled and len(gs.event_log) % every == 0:
+            await orchestrator.update_rolling_summary(gs)
     except Exception as exc:  # noqa: BLE001
-        log.warning("scene summary refresh failed (%s): %s", type(exc).__name__, exc)
+        log.warning("rolling summary refresh failed (%s): %s", type(exc).__name__, exc)
     gs.bump()
 
 
@@ -385,6 +445,45 @@ def _entity_combat_trigger_id(gs: game_state.GameState, target: str | None) -> s
         if ent.get("disposition") in {"hostile", "attack"}:
             return ent["id"]
     return None
+
+
+_PRONOUN_TARGETS = {
+    "他", "她", "它", "牠", "他們", "她們", "它們", "牠們", "對方", "敵人", "敵方",
+    "them", "him", "her", "it",
+}
+
+
+def _resolve_attack_trigger(gs: game_state.GameState, intent) -> str | None:
+    """Resolve an attack target to a combat-ready entity id, MATERIALISING one on demand
+    when the target is a plausible but unregistered person/creature (e.g. attacking the
+    tavern barkeep, who lives only in the location card). Falls back to the existing
+    registered-entity / present-hostile lookup first; returns None when there's nothing
+    sensible to fight (so dispatch degrades to a normal skill check)."""
+    existing = _entity_combat_trigger_id(gs, intent.target)
+    if existing:
+        return existing
+    target = (intent.target or "").strip()
+    # A bare pronoun with no resolvable present hostile has no antecedent to spin up —
+    # don't conjure an entity literally named "他". (Once a foe is registered, the
+    # present-hostile scan in _entity_combat_trigger_id catches the pronoun above.)
+    if not target or target.lower() in _PRONOUN_TARGETS:
+        return None
+    # A target that already resolves to a record we DIDN'T pick above is a non-combatant
+    # (object/location) or an absent corpse — not a new fight.
+    if store.find_by_ref(gs.current_location_id, target) is not None:
+        return None
+    # A place/exit reference is travel, never an attack target.
+    if _looks_like_travel(gs, intent):
+        return None
+    kind = monsters.infer_combat_kind(target)
+    disposition = monsters.infer_disposition(target)
+    ent_id = store.register_combatant(
+        gs.current_location_id, target, kind, disposition=disposition,
+    )
+    if ent_id:
+        log.info("attack target materialised on demand: scope=%s target=%s kind=%s disp=%s id=%s",
+                 gs.current_location_id, target, kind, disposition, ent_id)
+    return ent_id
 
 
 def _attack_ready_entities(gs: game_state.GameState) -> list[dict]:
@@ -624,10 +723,21 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         log.info("process_action → _begin_scene_combat (attack triggered encounter)")
         gs.clear_pending_freeplay_action()
         await _begin_scene_combat(channel, gs)
-    elif intent.is_attack and (trigger_entity_id := _entity_combat_trigger_id(gs, intent.target)):
-        log.info("process_action → _begin_entity_combat target=%s entity=%s", intent.target, trigger_entity_id)
-        gs.clear_pending_freeplay_action()
-        await _begin_entity_combat(channel, gs, trigger_entity_id)
+    elif intent.is_attack and (trigger_entity_id := _resolve_attack_trigger(gs, intent)):
+        trigger_ent = store.get_entity_by_id(trigger_entity_id)
+        disposition = (trigger_ent or {}).get("disposition")
+        if game_state.GameState.is_combat_hostile(disposition):
+            log.info("process_action → _begin_entity_combat target=%s entity=%s (hostile)",
+                     intent.target, trigger_entity_id)
+            gs.clear_pending_freeplay_action()
+            await _begin_entity_combat(channel, gs, trigger_entity_id)
+        else:
+            # Provocation ladder: attacking a non-hostile unit degrades its attitude one
+            # rung (with an NPC reaction) instead of snapping into combat. Combat only
+            # begins once it has been pushed to hostile (see _begin_provocation_beat).
+            log.info("process_action → _begin_provocation_beat target=%s entity=%s disp=%s",
+                     intent.target, trigger_entity_id, disposition)
+            await _begin_provocation_beat(channel, user, gs, pc, intent, trigger_entity_id)
     elif intent.needs_check:
         log.info("process_action → _begin_check (out-of-combat check)")
         await _begin_check(channel, user, gs, pc, intent, assessment)
@@ -718,6 +828,38 @@ async def _begin_narrative(channel, user, gs, pc, intent) -> None:
     await _send_freeplay_turn_prompt(channel, gs)
 
 
+async def _begin_provocation_beat(channel, user, gs, pc, intent, trigger_entity_id: str) -> None:
+    """A player attack on a non-hostile unit (design: provocation ladder). No dice, no
+    damage — step the target's attitude one rung toward hostility (friendly→neutral→hostile)
+    and let the narrator dramatise the unit's reaction. The NEXT swing at a now-hostile unit
+    is what _resolve_attack_trigger/dispatch routes into real combat."""
+    before = (store.get_entity_by_id(trigger_entity_id) or {}).get("disposition") or "neutral"
+    gs.begin_freeplay_action(pc.id)
+    after = gs.provoke_entity(trigger_entity_id)
+    target_name = (store.get_entity_by_id(trigger_entity_id) or {}).get("name") or intent.target
+    if before in {"afraid", "cowed"} or after == before:
+        # Submissive unit — it cowers / flees / begs rather than escalating.
+        hint = (f"{target_name} 並不還手：受驚退避、求饒或試圖逃走，絕不轉為戰鬥。"
+                "描述對方的畏縮反應與玩家攻擊落空/被閃避，不造成傷害。")
+    elif after in {"hostile", "attack"}:
+        hint = (f"{target_name} 被徹底激怒，態度轉為敵對、擺出戰鬥姿態並發出最後警告——"
+                "但尚未交手。描述這一擊與對方翻臉的瞬間，不造成傷害、不擲骰。")
+    else:
+        hint = (f"{target_name} 對這次挑釁感到震驚與慍怒，出言警告或戒備後退，態度明顯轉壞。"
+                "描述玩家的攻擊被閃過/格開，不造成傷害、不擲骰。")
+    await _persist(gs)
+    async with channel.typing():
+        result = resolution.narrative_beat(
+            gs, pc, intent.raw_text or intent.action or "挑釁",
+            target_name=target_name, raw_text=intent.raw_text, hint=hint,
+        )
+        prose = await _narrate_into_log(gs, result)
+    await channel.send(embed=embeds.result_embed(result, prose))
+    gs.complete_freeplay_action(pc.id)
+    await _track_story(channel, gs)
+    await _send_freeplay_turn_prompt(channel, gs)
+
+
 async def _send_implausible_redirect(channel, user, gs, pc, intent) -> None:
     """The message leaned on a false premise (gear the actor doesn't carry, or a fact not
     in the scene). Redirect in-world instead of offering a menu that legitimises it."""
@@ -779,7 +921,7 @@ def _travel_metrics(src_id: str, traversed: list[str], units: list[object]) -> d
         speeds = [world_movement.unit_speed(unit, node) for unit in units]
         speed = min(speeds) if speeds else world_movement.DEFAULT_MOVEMENT_BASE_KMH
         distance_km += edge_km
-        time_h += edge_km / max(speed, 0.1)
+        time_h += world_movement.edge_time_hours(prev, node, speed)
         prev = node
     speed_kmh = distance_km / time_h if time_h > 0 else 0.0
     return {"distance_km": distance_km, "time_h": time_h, "speed_kmh": speed_kmh}
@@ -800,6 +942,7 @@ def _plan_travel(src_id: str, dst_id: str, units: list[object] | None = None) ->
     if path is None:
         return {"reached": None, "traversed": [], "cost": 0, "blocked": None,
                 "warnings": [], "unreachable": True,
+                "source_id": src_id,
                 "distance_km": 0.0, "time_h": 0.0, "speed_kmh": 0.0}
     traversed: list[str] = []
     cost = 0
@@ -817,6 +960,7 @@ def _plan_travel(src_id: str, dst_id: str, units: list[object] | None = None) ->
     metrics = _travel_metrics(src_id, traversed, units)
     return {"reached": traversed[-1] if traversed else None, "traversed": traversed,
             "cost": cost, "blocked": blocked, "warnings": warnings, "unreachable": False,
+            "source_id": src_id,
             **metrics}
 
 
@@ -835,13 +979,26 @@ def _hard_block_message(blocked_id: str | None) -> str:
 def _travel_notice(plan: dict) -> str:
     """Routing + soft-gate flavour shown before the destination scene opens."""
     bits: list[str] = []
-    inter = plan["traversed"][:-1]  # intermediates the party passed through to get here
+    traversed = list(plan["traversed"])
+    inter = traversed[:-1]  # intermediates the party passed through to get here
     names = [(store.get_entity_by_id(i) or {}).get("name", "") for i in inter]
     names = [n for n in names if n]
     if names:
         bits.append(f"🧭 你途經 {'、'.join(names)}")
     distance = float(plan.get("distance_km") or 0.0)
     time_h = float(plan.get("time_h") or 0.0)
+    source_id = plan.get("source_id")
+    pure_containment = bool(traversed and source_id and not plan.get("blocked") and distance <= 0)
+    prev = source_id
+    for node in traversed:
+        if world_movement.edge_kind(str(prev), node) != "containment":
+            pure_containment = False
+            break
+        prev = node
+    if pure_containment:
+        here = (store.get_entity_by_id(str(source_id)) or {}).get("name") or str(source_id)
+        dest = (store.get_entity_by_id(traversed[-1]) or {}).get("name") or traversed[-1]
+        bits.append(f"🧭 你走出了{here}，來到{dest}。")
     if distance > 0 and time_h > 0:
         bits.append(f"🧭 路程約 {_fmt_amount(distance)} km，耗時約 {_fmt_hours(time_h)}。")
     for w in plan["warnings"]:
@@ -919,7 +1076,7 @@ async def _begin_travel(channel, user, gs, pc, intent) -> None:
                 "cost": store.location_travel_cost(loc["id"]), "blocked": None,
                 "warnings": [{"id": loc["id"], "access": store.location_access(loc["id"])}]
                 if store.location_access(loc["id"])["gate"] == "soft" else [],
-                "unreachable": False,
+                "unreachable": False, "source_id": src_id,
                 **_travel_metrics(src_id, traversed, travel_units)}
     if plan["reached"] is None:
         # The immediate next hop is hard-gated — the party doesn't move.
@@ -1142,9 +1299,9 @@ async def _after_combat(channel, gs, outcome: str) -> None:
     # Winning the boss fight completes the climax beat.
     if gs.scene.id == "warren":
         gs.flags["climax_resolved"] = True
-    # Goal-driven, not the linear next_scene rail: end on the terminal beat, otherwise
-    # return to free play and let the players choose where to go (with a nudge).
-    await _advance_story(channel, gs, win_ending=scenario.ENDINGS["victory"])
+    # A-sandbox: GOALS is empty so _advance_story never reaches a terminal beat — winning a
+    # fight just returns to free play. ENDINGS has no "victory" key now, hence .get().
+    await _advance_story(channel, gs, win_ending=scenario.ENDINGS.get("victory", ""))
 
 
 async def _advance_story(channel, gs, *, win_ending: str) -> None:
@@ -1194,6 +1351,10 @@ def _npc_initiated_combat_line(attackers: list[dict], flipped: list[str]) -> str
 async def _maybe_npc_initiated_combat(channel, gs) -> bool:
     if gs.flags.get("over") or (gs.combat and gs.combat.active):
         return False
+    # Provoked-but-left-alone units cool back to their baseline after a calm in-game day.
+    recovered = gs.recover_provoked_dispositions()
+    if recovered:
+        log.info("provocation recovered to baseline: scope=%s ids=%s", gs.current_location_id, recovered)
     flipped = gs.escalate_hostiles()
     attackers = _attack_ready_entities(gs)
     if not attackers:
@@ -1215,8 +1376,12 @@ async def _maybe_resolve_climax(channel, gs, result) -> None:
     social = {"diplomacy", "intimidation", "stealth", "deception"}
     summ = result.summary.lower()
     if result.success and any(s in summ for s in social):
-        gs.flags["climax_resolved"] = True
-        await _end_game(channel, gs, scenario.ENDINGS["peaceful"])
+        # A-sandbox: a scripted "peaceful" ending no longer exists. If one is configured we
+        # honour it; otherwise the social win simply narrates and free play continues.
+        peaceful = scenario.ENDINGS.get("peaceful")
+        if peaceful:
+            gs.flags["climax_resolved"] = True
+            await _end_game(channel, gs, peaceful)
     elif result.success is False and any(s in summ for s in social):
         await channel.send("葛利克斯低吼一聲，談判破裂。哥布林們撲上前攻擊！")
         await _begin_scene_combat(channel, gs)

@@ -1,0 +1,33 @@
+# meta.yaml — 劇本層級全域設定（晨橋商隊）
+# 對應原 scenario.py 的 TITLE / INTRO / HOW_TO_PLAY / first_scene() / ENDINGS
+schema_version: 1
+id: dawnbridge
+
+title: 晨橋商隊
+intro: |
+  **晨橋商隊**，一段適合兩人的短篇冒險。
+
+  邊境村莊**晨橋村**坐落在東路跨越湍急河川之處。三天前，一支商隊沿東路出發，
+  卻始終沒有抵達下一座城鎮。今晚，在鎏金酒杯酒館溫暖的燈光下，有人正準備開口求助。
+how_to_play: |
+  **玩法說明**：只要在這個頻道用白話說出你的角色要做什麼。
+  例如：問酒保失蹤商隊的事。我會判斷這需要哪一種技能檢定。
+  如果需要擲骰，我會貼出一個擲骰按鈕，點擊後就會顯示結果。骰子會在伺服器端擲出，
+  按鈕只負責公開結果。
+  不知道該做什麼也沒關係，說個大方向，我會提供可行選項。
+  斜線指令：`/character`（角色卡）、`/scene`（目前場景）、`/roll 1d20+3`（手動擲骰）。
+
+# 取代 scenario.first_scene()：新遊戲時隊伍的起始地點（必須是 locations.yaml 的 id）。
+start_location: tavern
+
+# 取代 scene.cost_pool 的全域預設；某地點若自訂 cost_pool 則覆寫此值。
+# 兩者都沒命中時引擎再退回 skill 預設 → TIME。每個值必須是 CostType 成員。
+default_cost_pool: [time, attention, resource]
+
+# A 案（純沙盒）：世界不自動結束，沒有 terminal goal、沒有達成式結局。
+# 原 victory / peaceful 已移除（觸發點來自 goals.terminal，goals 已捨棄）。
+# 只保留 defeat：全隊陣亡時由引擎 TPK 觸發。要主動收尾由 GM 手動指令。
+endings:
+  defeat: >
+    巢穴裡只剩哥布林的笑聲迴盪，隊伍的故事在黑暗中告終。但在活生生的世界裡，
+    即使倒下的人也會被記得。**劇終。**

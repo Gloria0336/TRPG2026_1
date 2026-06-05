@@ -584,6 +584,40 @@ async def extract_entity_states(state: GameState, prose: str, result: Resolution
     return EntityExtraction()
 
 
+async def update_rolling_summary(state: GameState) -> str | None:
+    """Compress the story-so-far for the current location into a few durable bullet lines
+    and persist it on scene_state.current_summary, so plot that has scrolled out of the
+    event window is still re-injected via compose_scene_summary. Cheap model, plain text.
+    Offline / disabled / on any error → leaves the existing digest untouched (returns
+    None), so this layer can never break play."""
+    if not (_ai_enabled() and settings.rolling_summary_enabled):
+        return None
+    scope = state.current_location_id
+    if not scope:
+        return None
+    try:
+        digest = await _chat(
+            settings.model_extract,
+            prompts.ROLLING_SUMMARY_SYSTEM,
+            prompts.rolling_summary_context(state),
+            max_tokens=300,
+        )
+        digest = (digest or "").strip()
+        if not digest:
+            return None
+        from ..db import store  # local import to mirror other store touchpoints
+        store.set_current_summary(scope, digest)
+        log.info("rolling summary updated: scope=%s (%d chars)", scope, len(digest))
+        return digest
+    except httpx.HTTPError as exc:
+        log.warning("rolling summary: HTTP failure (%s: %s) — keeping old digest",
+                    type(exc).__name__, exc)
+    except Exception as exc:  # noqa: BLE001 — memory layer must not break play
+        log.warning("rolling summary: failed (%s: %s) — keeping old digest",
+                    type(exc).__name__, exc)
+    return None
+
+
 async def recap_scene(state: GameState) -> str:
     """Fresh GM description of the CURRENT situation from live state (for /scene), not the
     static authored summary. Offline / on any error → the live composed summary text, so

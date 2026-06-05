@@ -99,12 +99,18 @@ def compose_scene_summary(state: "GameState") -> str:
     except Exception:  # noqa: BLE001
         ss = None
     base = (ss or {}).get("base_summary") or state.scene.summary
+    # Rolling digest of story-so-far (written by orchestrator.update_rolling_summary).
+    # Remembers plot that has scrolled out of the event window. Skipped when it has not
+    # diverged from base yet (fresh scene) to avoid echoing the backstory twice.
+    digest = ((ss or {}).get("current_summary") or "").strip()
 
     all_entities = state.all_entities()
     present = [e for e in all_entities if e["status"] not in store._ABSENT_STATUSES]
     absent = [e for e in all_entities if e["status"] in store._ABSENT_STATUSES]
 
     parts = [base]
+    if digest and digest != (base or "").strip():
+        parts.append("至此發生過的關鍵情節（必須與此一致）：\n" + digest)
     # Persistent place-state (tripwire disarmed, water spilled …) survives revisits.
     try:
         place_state = store.location_state_note(state.current_location_id)
@@ -381,7 +387,12 @@ def intent_context(
     present = [e for e in state.present_entities() if e.get("kind") != "location"]
     npcs = ", ".join(e["name"] for e in present) if present else "none notable"
     in_combat = "YES — this is a combat turn." if (state.combat and state.combat.active) else "no"
-    carried = "、".join(actor.inventory) if getattr(actor, "inventory", None) else "（無特別裝備）"
+    try:
+        projected_inventory = store.project_inventory(actor.id)
+    except Exception:  # noqa: BLE001
+        projected_inventory = []
+    carried_items = projected_inventory or list(getattr(actor, "inventory", None) or [])
+    carried = "、".join(carried_items) if carried_items else "（無特別裝備）"
 
     # Reachable destinations. Listing aliases too lets the parser map free-text
     # ("酒館"/"鎏金酒杯酒館") onto the same canonical place.
@@ -454,17 +465,19 @@ or add a different one.
 fiction, not the math."""
 
 
-def _event_line(e) -> str:
-    """Format one past event as `- <actor> → <target>: <summary>` plus the prose that
-    was narrated for it. Feeding the PROSE back (not just the mechanical summary) is
-    what lets the narrator stay consistent with established fiction."""
+def _event_line(e, *, full: bool = True) -> str:
+    """Format one past event as `- <actor> → <target>: <summary>`. When `full`, also feed
+    back the PROSE that was narrated for it — that is what lets the narrator stay
+    consistent with established fiction. Older events pass full=False to keep only the
+    mechanical summary, so recent beats stay vivid without the window blowing up."""
     actor = e.actor_name
     target = (e.data or {}).get("target_name") if hasattr(e, "data") else None
     head = f"{actor} → {target}" if target else actor
     line = f"- {head}: {e.summary}"
-    prose = getattr(e, "narration", "")
-    if prose:
-        line += f"\n  敘事：{truncate(prose, 160)}"
+    if full:
+        prose = getattr(e, "narration", "")
+        if prose:
+            line += f"\n  敘事：{truncate(prose, 160)}"
     return line
 
 
@@ -483,6 +496,12 @@ def _entities_block(state: "GameState") -> str:
             agenda = (e.get("flags") or {}).get("agenda") if isinstance(e.get("flags"), dict) else None
             if agenda:
                 line += f"\n  （暗中目標，僅供你鋪陳、勿直接揭露：{truncate(agenda, 80)}）"
+            # Durable promises / standing facts this NPC made — re-injected every turn so
+            # the narrator stays consistent with them no matter how long ago they happened.
+            commitments = store.entity_commitments(e)
+            if commitments:
+                line += "\n  （已立下、必須遵守的承諾／既定事實：" + \
+                    "；".join(truncate(c, 60) for c in commitments) + "）"
             present_lines.append(line)
         lines.append("HERE NOW:\n" + "\n".join(present_lines))
     if absent:
@@ -512,9 +531,18 @@ def _quests_block(state: "GameState") -> str:
 
 
 def narrate_context(state: "GameState", result: "ResolutionResult") -> str:
+    # Layered memory: the most recent `full_n` beats keep their full prose; older beats
+    # back to `window` keep only their mechanical summary line; anything older than that
+    # lives in the rolling scene digest (compose_scene_summary). The very last event is
+    # the one being narrated right now, so it is excluded.
     window = settings.narrate_context_window
-    recent = state.event_log[-window:-1] if len(state.event_log) > 1 else []
-    history = "\n".join(_event_line(e) for e in recent) or "- (location just entered)"
+    full_n = min(settings.narrate_full_context_window, window)
+    prior = state.event_log[:-1] if len(state.event_log) > 1 else []
+    recent_full = prior[-full_n:] if full_n else []
+    older = prior[-window:-full_n] if window > full_n else []
+    lines = [_event_line(e, full=False) for e in older]
+    lines += [_event_line(e, full=True) for e in recent_full]
+    history = "\n".join(lines) or "- (location just entered)"
     entities = _entities_block(state)
     parts = [
         f"LOCATION: {current_location_label(state)}\n{compose_scene_summary(state)}",
@@ -693,6 +721,46 @@ def scene_recap_context(state: "GameState") -> str:
     ])
 
 
+# ───────────────────────── Rolling scene digest ─────────────────────────
+ROLLING_SUMMARY_SYSTEM = """You maintain the running MEMORY of a tabletop RPG session. \
+You are given the PREVIOUS digest plus the latest events, and must return an UPDATED \
+digest of the story so far for THIS location.
+
+RULES:
+- Write ONLY in Traditional Chinese, as a short bullet list (max 8 lines, one fact each).
+- Keep DURABLE facts: decisions made, secrets revealed, deals struck, who did what to \
+whom, unresolved threads, where the party intends to go. Drop momentary flavour.
+- NEVER include dice, HP, damage, DCs, or numbers — only fiction.
+- MERGE, don't append: fold new events into the existing lines, drop anything now \
+obsolete or superseded, keep it tight. Prefer rewriting over growing.
+- Do not restate the static backstory; record only what has HAPPENED since.
+- Output ONLY the bullet lines, no preamble, no headings."""
+
+
+def rolling_summary_context(state: "GameState") -> str:
+    """Feed the previous digest + the recent beats so the model can refresh the running
+    memory. Uses the full event window (the span about to scroll out of full-prose
+    context), so nothing important is silently forgotten."""
+    window = settings.narrate_context_window
+    recent = state.event_log[-window:] if state.event_log else []
+    history = "\n".join(_event_line(e, full=True) for e in recent) or "-（尚無事件）"
+    prev = ""
+    try:
+        ss = store.get_scene_state(state.current_location_id)
+        prev = ((ss or {}).get("current_summary") or "").strip()
+        base = ((ss or {}).get("base_summary") or "").strip()
+        if prev == base:
+            prev = ""  # not yet diverged from backstory → treat as empty
+    except Exception:  # noqa: BLE001
+        prev = ""
+    return "\n".join([
+        f"LOCATION: {current_location_label(state)}",
+        "PREVIOUS DIGEST:\n" + (prev or "-（尚無）"),
+        f"NEW EVENTS:\n{history}",
+        "Return the updated digest now (Traditional Chinese bullets only):",
+    ])
+
+
 # ───────────────────────── Entity-state extractor ─────────────────────────
 EXTRACT_SYSTEM = f"""You are a STATE EXTRACTOR for a tabletop RPG engine. You read one \
 GM narration and the list of KNOWN ENTITIES, then report ONLY changes to the entities' \
@@ -719,10 +787,22 @@ entity already has.
 a person/creature/object that appears, OR a named place the narration introduces (use \
 `register_kind`:"location"). Reporting a new place is just a candidate — the engine \
 decides when it becomes permanent, so report it whenever it is clearly named.
+- Set `commitment` ONLY when an NPC makes a PROMISE, reveals a standing fact, or shifts \
+their lasting stance toward the party that must hold for the rest of the session — e.g. \
+"答應帶路去地窖", "供出走私船叫海燕號", "從此視玩家為盟友". This is for durable \
+relationship/plot memory, NOT for one-off mood or movement. Leave it null otherwise. The \
+`entity_ref` must be the NPC who made it.
 - Set `location_note` ONLY for a lasting change to the PLACE itself that is not tied to \
 any single entity — e.g. a trap is disarmed, a fire is lit, water is spilled, a door is \
 broken open. Leave it null for ordinary movement or for changes already captured by an \
 entity delta above.
+
+- Set `item_grants` ONLY when the narration clearly transfers possession: the actor \
+picks up, receives, buys, loots, is handed, or is awarded an item from a plausible \
+in-scene source. Mere mention, scenery, looking at an item, wanting an item, or unfinished \
+negotiation MUST leave `item_grants` empty. Do not register loot just because it exists \
+in the room. Use `recipient_ref` only when the narration names a recipient; otherwise \
+leave it null so the engine can use the acting PC.
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):
 {EXTRACT_JSON_SHAPE}"""

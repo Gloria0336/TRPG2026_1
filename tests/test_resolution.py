@@ -63,9 +63,11 @@ def test_requires_check_forces_roll_for_attack():
 
 
 def test_requires_check_free_for_reading_held_map():
-    # tavern lists perception as a DC-15 challenge, but a map you hold is not a scene
-    # entity — a bare scene-wide skill DC must NOT force a roll for reading it.
+    # A scene that flags perception, but a map you hold is not a scene entity — a bare
+    # scene-wide skill DC must NOT force a roll for reading it. (Scenarios no longer author
+    # challenges, so the flag is set explicitly to exercise the obstacle gate.)
     gs = _fresh()
+    gs.scene.challenges = {"perception": 15}
     intent = Intent(actor_id="pc_lyra", raw_text="我查看手上的地圖",
                     tier=IntentTier.A, action="look", approach="perception",
                     target="地圖", needs_check=False)
@@ -83,7 +85,9 @@ def test_requires_check_free_for_look_without_target():
 def test_requires_check_forces_roll_examining_present_scene_entity():
     # Engaging a PRESENT scene entity (老佩林) with a skill the scene flags (perception)
     # still rolls — the surgical replacement for the old blanket scene-challenge force.
+    # (Scenarios no longer author challenges, so the flag is set explicitly here.)
     gs = _fresh()
+    gs.scene.challenges = {"perception": 13}
     intent = Intent(actor_id="pc_lyra", raw_text="我仔細打量老佩林",
                     tier=IntentTier.A, action="look", approach="perception",
                     target="老佩林", needs_check=False)
@@ -98,7 +102,10 @@ def test_requires_check_forces_roll_against_wary_target():
 
 
 def test_determine_dc_uses_scene_table():
+    # Scenarios no longer author challenges; set one explicitly to exercise the scene-table
+    # fallback branch of determine_dc (used only when the AI returns no assessment).
     gs = _fresh()
+    gs.scene.challenges = {"diplomacy": 11}
     intent = Intent(actor_id="pc_lyra", raw_text="persuade", tier=IntentTier.A, approach="diplomacy")
     assert resolution.determine_dc(gs, intent, None) == gs.scene.challenges["diplomacy"]
 
@@ -131,7 +138,8 @@ def test_determine_dc_defaults_to_normal():
 
 def test_determine_dc_applies_npc_disposition_offset():
     gs = _fresh()
-    # 老佩林 is friendly (−3); persuasion scene DC is 11 → 11 − 3 = 8.
+    gs.scene.challenges = {"diplomacy": 11}  # explicit base (scenarios no longer author DCs)
+    # 老佩林 is friendly (−3); persuasion(→diplomacy) base DC 11 → 11 − 3 = 8.
     friendly = Intent(actor_id="pc_lyra", raw_text="說服老佩林", tier=IntentTier.A,
                       approach="persuasion", target="老佩林")
     assert resolution.determine_dc(gs, friendly, None) == 8
@@ -161,12 +169,13 @@ def test_determine_dc_npc_offset_stacks_with_assessment_and_floors():
 
 def test_resolve_records_npc_disposition_audit():
     gs = _fresh()
+    gs.scene.challenges = {"diplomacy": 11}  # explicit base (scenarios no longer author DCs)
     intent = Intent(actor_id="pc_lyra", raw_text="說服老佩林", tier=IntentTier.A,
                     action="persuade", approach="persuasion", target="老佩林")
     res = resolution.resolve(gs, intent)
     assert res.dc_npc_modifier == -3
     assert res.dc_npc_disposition == "friendly"
-    # friendly −3 off the persuasion scene DC of 11.
+    # friendly −3 off the explicit base DC of 11.
     assert res.dc == 8
 
 

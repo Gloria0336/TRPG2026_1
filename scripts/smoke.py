@@ -100,7 +100,8 @@ async def main() -> None:
     await do_action(gs, "pc_bram", "I search the wrecked wagons for clues")
     await do_action(gs, "pc_lyra", "I follow the tracks leading away from the road")
 
-    gs.goto_scene(scenario.scene_by_id("ambush"))
+    # ambush was removed; warren now carries the encounter (scenes project from locations).
+    gs.goto_scene(scenario.scene_by_id("warren"))
     banner(f"SCENE 3 — {gs.scene.title} (COMBAT)")
     print(await orchestrator.open_scene(gs))
     gs.start_scene_combat()

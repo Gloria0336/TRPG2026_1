@@ -1,0 +1,78 @@
+# entities.yaml — 全域敘事實體池（晨橋商隊）
+# 對應原各 scene 內嵌的 "entities"。用 `location` 欄位錨回地點：隊伍抵達該地點時 seed。
+#   location  錨定地點 id（locations.yaml）
+#   kind      person / object / creature / location
+#   statblock 可選——若此實體會參戰，對到 monsters 模板（store.seed_entities 會忽略此 key）
+# 注意：entity id 同時是 inventory 的 actor key（actor_inventory.actor_id），不可改名。
+schema_version: 1
+
+entities:
+  # --- 鎏金酒杯酒館 ---
+  - id: ent_perrin
+    location: tavern
+    kind: person
+    name: 老佩林
+    aliases: [佩林, 老佩林（商人）, 商人]
+    status: present
+    disposition: friendly
+    notes: 焦急的商人；商隊三天前在東路失蹤，懸賞 50 金幣。
+    flags: { movement_base: 2 }
+
+  - id: ent_hooded
+    location: tavern
+    kind: person
+    name: 緊張的兜帽客
+    aliases: [兜帽客, 兜帽人, 神秘人, 兜帽客人]
+    status: present
+    disposition: afraid
+    notes: 坐在角落，不時偷瞄佩林。
+    flags:
+      agenda: 暗中監視佩林，怕商隊真相被查出；情勢不對就設法溜走
+      movement_base: 5
+
+  # --- 東路 ---
+  - id: obj_wagons
+    location: east_road
+    kind: object
+    name: 翻覆的貨車
+    aliases: [貨車, 翻覆貨車, 馬車]
+    status: present
+    notes: 兩輛翻覆的貨車、散落的箱子、深色血跡，幾乎沒有屍體。
+
+  - id: obj_tracks
+    location: east_road
+    kind: object
+    name: 粗糙的足跡
+    aliases: [足跡, 腳印, 痕跡]
+    status: present
+    notes: 離開道路、通往岩石山坡的足跡。
+
+  - id: obj_tripwire
+    location: east_road
+    kind: object
+    name: 絆線
+    aliases: [絆線, 陷阱, 反光的線]
+    status: present
+    notes: 前方小徑上微微反光的絆線。
+
+  # 原 scene "ambush" 的實體 loc_warren_mouth（山坡裂隙）已隨伏擊刪除；併入 warren 的 card。
+
+  # --- 哥布林巢穴 ---
+  - id: ent_grix
+    location: warren
+    kind: creature
+    name: 哥布林首領葛利克斯
+    aliases: [葛利克斯, 首領, 哥布林首領]
+    status: present
+    disposition: hostile
+    statblock: goblin_boss
+    notes: 用刀挾持人質，威脅隊伍離開。
+
+  - id: ent_hostage
+    location: warren
+    kind: person
+    name: 被俘商隊護衛
+    aliases: [護衛, 人質, 商隊護衛]
+    status: present
+    disposition: afraid
+    notes: 被葛利克斯用刀抵住的人質。

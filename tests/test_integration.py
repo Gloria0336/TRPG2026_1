@@ -10,9 +10,10 @@ from app.engine.types import ActionCost, ActionType
 from app.state import game_state
 
 
-def _start_ambush():
+def _start_combat():
     gs = game_state.new_game(channel_id=1)
-    gs.goto_scene(scenario.scene_by_id("ambush"))
+    # warren carries the encounter now (scenes are projected from locations; ambush removed)
+    gs.goto_scene(scenario.scene_by_id("warren"))
     gs.start_scene_combat()
     return gs
 
@@ -28,7 +29,7 @@ def _seek_living_pc_turn(gs, limit=30):
 
 
 def test_bonus_action_after_main_action():
-    gs = _start_ambush()
+    gs = _start_combat()
     pc = _seek_living_pc_turn(gs)
     assert pc is not None
 
@@ -50,7 +51,7 @@ def test_bonus_action_after_main_action():
 
 
 def test_full_combat_terminates():
-    gs = _start_ambush()
+    gs = _start_combat()
     safety = 0
     while gs.combat and gs.combat.active and safety < 300:
         safety += 1
@@ -76,7 +77,7 @@ def test_full_combat_terminates():
 
 
 def test_snapshot_during_combat_roundtrips():
-    gs = _start_ambush()
+    gs = _start_combat()
     _seek_living_pc_turn(gs)
     d = gs.to_dict()
     gs2 = game_state.GameState.from_dict(d)

@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 
 from ..config import settings
+from ..content import items as item_catalog
 from ..content import monsters, scenario
 from ..content.characters import premade_pcs
 from ..db import store
@@ -58,6 +59,48 @@ def _dashboard_quest(q: dict) -> dict:
 # clock is absolute minutes in flags["world_minutes"]; stages are derived labels.
 TIME_OF_DAY_STAGES = ["清晨", "上午", "下午", "傍晚", "夜晚"]
 WORLD_START_MINUTES = 9 * 60
+
+
+def _legacy_inventory_lines(line: str) -> list[str]:
+    text = (line or "").strip()
+    if not text:
+        return []
+    if text == "鏈甲與盾牌":
+        return [part.strip() for part in text.split("與") if part.strip()]
+    return [text]
+
+
+def _migrate_character_inventory(c: Character) -> None:
+    """Move legacy free-text inventory into the relational inventory tables."""
+    try:
+        store.seed_items(item_catalog.SEED_ITEMS)
+        if not store.get_inventory(c.id):
+            for raw in c.inventory:
+                for line in _legacy_inventory_lines(raw):
+                    item = item_catalog.parse_freetext(line)
+                    if not item:
+                        continue
+                    store.grant_item(
+                        c.id,
+                        item["name"],
+                        category=item.get("category"),
+                        slot=item.get("slot"),
+                        aliases=item.get("aliases", []),
+                        description=item.get("description", ""),
+                        metadata=item.get("metadata", {}),
+                        source=item.get("source", "dynamic"),
+                        stackable=bool(item.get("stackable", True)),
+                    )
+        projected = store.project_inventory(c.id)
+        if projected:
+            c.inventory = projected
+    except Exception as exc:  # noqa: BLE001
+        log.warning("inventory migration failed for %s (%s): %s", c.id, type(exc).__name__, exc)
+
+
+def _refresh_inventory_projections(characters: dict[str, Character]) -> None:
+    for c in characters.values():
+        _migrate_character_inventory(c)
 STAGE_START_MINUTES = {
     "清晨": 5 * 60,
     "上午": 8 * 60,
@@ -68,6 +111,19 @@ STAGE_START_MINUTES = {
 _COMBAT_ENTITY_KINDS = {"person", "creature"}
 _HOSTILE_COMBAT_DISPOSITIONS = {"hostile", "attack"}
 _HOSTILE_SINCE_FLAG = "hostile_since_round"
+
+# Provocation ladder (design: attacking a peaceful unit shouldn't snap straight into
+# combat — it degrades attitude one rung per swing). Attacking a unit already on the
+# bottom rung (hostile/attack) is what actually starts combat, so:
+#   friendly → tolerates 2 swings, fights on the 3rd
+#   neutral  → tolerates 1 swing,  fights on the 2nd
+#   hostile  → fights immediately
+# `wary` collapses onto `neutral`; `afraid`/`cowed` never escalate (they flee/beg).
+_PROVOKE_LADDER = ("friendly", "neutral", "hostile")
+_PROVOKE_SUBMISSIVE_DISPOSITIONS = {"afraid", "cowed"}
+_PROVOKE_BASELINE_FLAG = "provoke_baseline"   # attitude before the first provocation
+_PROVOKED_AT_FLAG = "provoked_at"             # world_minutes of the latest provocation
+_PROVOKE_RECOVER_MINUTES = 24 * 60            # a calm in-game day restores the baseline
 
 
 # ───────────────────────── Scene ─────────────────────────
@@ -530,6 +586,70 @@ class GameState:
             self.bump()
         return flipped
 
+    # ── provocation ladder (player attacks a non-hostile unit) ──
+    @staticmethod
+    def is_combat_hostile(disposition: str | None) -> bool:
+        """True when attacking this unit starts combat outright (bottom of the ladder)."""
+        return disposition in _HOSTILE_COMBAT_DISPOSITIONS
+
+    @staticmethod
+    def _step_down_disposition(disposition: str | None) -> str:
+        """One rung down the provocation ladder toward hostility. `wary` collapses onto
+        `neutral`; anything already at/below `hostile` stays `hostile`."""
+        cur = "neutral" if disposition == "wary" else (disposition or "neutral")
+        if cur not in _PROVOKE_LADDER:
+            return "hostile"
+        idx = _PROVOKE_LADDER.index(cur)
+        return _PROVOKE_LADDER[min(idx + 1, len(_PROVOKE_LADDER) - 1)]
+
+    def provoke_entity(self, ent_id: str) -> str | None:
+        """Record one player provocation (an attack that did NOT yet start combat): step the
+        entity's attitude one rung down the ladder and stamp it for later recovery. Returns
+        the NEW disposition, or None if the entity is gone. Submissive units (afraid/cowed)
+        do not escalate — they keep their attitude and the caller narrates a flee/beg beat."""
+        ent = store.get_entity_by_id(ent_id)
+        if ent is None:
+            return None
+        cur = ent.get("disposition") or "neutral"
+        if cur in _PROVOKE_SUBMISSIVE_DISPOSITIONS:
+            return cur
+        flags = dict(ent.get("flags") or {})
+        flags.setdefault(_PROVOKE_BASELINE_FLAG, cur)   # remember pre-provocation attitude once
+        flags[_PROVOKED_AT_FLAG] = self.world_minutes()
+        new = self._step_down_disposition(cur)
+        self._write_entity_state(ent, disposition=new, flags=flags)
+        self.bump()
+        return new
+
+    def recover_provoked_dispositions(self) -> list[str]:
+        """Restore baseline attitude for units that were provoked but left alone for a full
+        in-game day (design D: provocation resets over time). Returns the restored ids."""
+        now = self.world_minutes()
+        restored: list[str] = []
+        changed = False
+        for ent in self.present_entities():
+            flags = dict(ent.get("flags") or {})
+            if _PROVOKED_AT_FLAG not in flags:
+                continue
+            try:
+                since = int(flags[_PROVOKED_AT_FLAG])
+            except (TypeError, ValueError):
+                since = now
+            if now - since < _PROVOKE_RECOVER_MINUTES:
+                continue
+            baseline = flags.pop(_PROVOKE_BASELINE_FLAG, None)
+            flags.pop(_PROVOKED_AT_FLAG, None)
+            self._write_entity_state(
+                ent,
+                disposition=baseline if baseline in store.DISPOSITIONS else ent.get("disposition"),
+                flags=flags,
+            )
+            restored.append(ent["id"])
+            changed = True
+        if changed:
+            self.bump()
+        return restored
+
     def reconcile_combat_entities(self) -> list[str]:
         """Write entity-backed combat outcomes back to the durable world state."""
         if not self.combat:
@@ -706,6 +826,7 @@ class GameState:
         gs.started = d.get("started", False)
         gs.event_log = [Event.from_dict(e) for e in d.get("event_log", [])]
         gs.version = d.get("version", 0)
+        _refresh_inventory_projections(gs.characters)
         return gs
 
     def save(self) -> None:
@@ -734,11 +855,13 @@ def new_game(channel_id: int | None = None) -> "GameState":
     try:
         campaigns.begin_new(channel_id, title=scenario.TITLE)
         store.seed_locations(scenario.LOCATIONS)
+        store.seed_items(item_catalog.SEED_ITEMS)
     except Exception as exc:  # noqa: BLE001
         log.warning("new_game: campaign begin/seed failed (%s): %s", type(exc).__name__, exc)
     for pc in premade_pcs():
         gs.characters[pc.id] = pc
         gs.pc_ids.append(pc.id)
+    _refresh_inventory_projections(gs.characters)
     gs.flags["world_minutes"] = WORLD_START_MINUTES
     gs.flags["time_of_day"] = TIME_OF_DAY_STAGES[1]  # campaign opens mid-morning
     gs.goto_scene(scenario.first_scene())

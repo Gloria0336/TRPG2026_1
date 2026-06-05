@@ -68,7 +68,18 @@ class Settings(BaseSettings):
 
     # Engine
     dice_seed: int | None = None
+    # Layered narration memory (§ continuity):
+    #  - the most recent `narrate_full_context_window` beats are fed back with full prose,
+    #  - older beats up to `narrate_context_window` keep only their mechanical summary,
+    #  - everything older folds into the rolling scene digest below.
     narrate_context_window: int = 12
+    narrate_full_context_window: int = 6
+    # Rolling scene digest: every `rolling_summary_every` narrated beats, a cheap model
+    # compresses the story-so-far into a few durable bullet lines stored on
+    # scene_state.current_summary and re-injected via compose_scene_summary, so plot the
+    # event window has dropped is still remembered. Disable to fall back to window-only.
+    rolling_summary_enabled: bool = True
+    rolling_summary_every: int = 4
     ai_offline: bool = False
 
     # SQLite memory store (design §5.3, SQLite variant). Mutable so tests can point
@@ -81,6 +92,11 @@ class Settings(BaseSettings):
     # `max_finished_campaigns` FINISHED campaigns; in-progress dirs are not counted.
     campaigns_dir: Path = SAVE_DIR / "campaigns"
     max_finished_campaigns: int = 10
+
+    # Active scenario pack under app/content/scenarios/<name>/ (meta/locations/entities.yaml).
+    # The scenario loader (app/content/scenario.py) reads this to pick which authored
+    # content to load, so swapping the whole story is a one-line .env change (SCENARIO=...).
+    scenario: str = "dawnbridge"
 
     @field_validator("dice_seed", mode="before")
     @classmethod

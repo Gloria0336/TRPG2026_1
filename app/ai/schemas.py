@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from ..content import quest_taxonomy
-from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES
+from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES, ITEM_CATEGORIES
 from ..engine import conditions as cond
 from ..engine import rules_5e
 
@@ -118,6 +118,11 @@ class EntityStateDelta(BaseModel):
     disposition: str | None = None       # one of DISPOSITIONS
     location_id: str | None = None
     note: str | None = None              # short fact to append to the entity's notes
+    # A PROMISE / standing fact / attitude shift this entity just made toward the party
+    # that must persist regardless of the event window — e.g. "答應帶路去地窖",
+    # "從此視玩家為盟友", "供出了走私船的名字". Stored on the entity's flags and
+    # re-injected every turn (like agenda), so the NPC never contradicts it later.
+    commitment: str | None = None
     # Mechanical conditions the narration newly describes (e.g. the figure "was
     # tied up" → add_conditions=["restrained"]; "woke up" → remove_conditions=
     # ["unconscious"]). Unknown ids are filtered server-side; the model can't
@@ -164,8 +169,35 @@ class EntityStateDelta(BaseModel):
             return True
         return not any((
             self.status, self.disposition, self.location_id, self.note,
-            self.add_conditions, self.remove_conditions,
+            self.commitment, self.add_conditions, self.remove_conditions,
         ))
+
+
+class ItemGrant(BaseModel):
+    """One acquired item extracted from narration."""
+
+    item_name: str
+    recipient_ref: str | None = None
+    quantity: int = 1
+    category: str | None = None
+    source_ref: str | None = None
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _positive_quantity(cls, value: object) -> int:
+        try:
+            qty = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 1
+        return max(1, qty)
+
+    @field_validator("category")
+    @classmethod
+    def _valid_category(cls, value: str | None) -> str | None:
+        return value if value in ITEM_CATEGORIES else None
+
+    def is_noop(self) -> bool:
+        return not bool((self.item_name or "").strip())
 
 
 class EntityExtraction(BaseModel):
@@ -173,17 +205,21 @@ class EntityExtraction(BaseModel):
     optional lasting change to the PLACE itself (not tied to any one entity)."""
 
     deltas: list[EntityStateDelta] = Field(default_factory=list)
+    item_grants: list[ItemGrant] = Field(default_factory=list)
     # A persistent environmental change to the current location — e.g. "絆線已被拆除",
     # "地上的水囊潑灑了一地". Folded into the location's state and shown on revisits.
     location_note: str | None = None
 
-    @field_validator("deltas", mode="before")
+    @field_validator("deltas", "item_grants", mode="before")
     @classmethod
     def _none_to_empty(cls, value: object) -> object:
         return [] if value is None else value
 
     def actionable(self) -> list[EntityStateDelta]:
         return [d for d in self.deltas if not d.is_noop()]
+
+    def acquired_items(self) -> list[ItemGrant]:
+        return [g for g in self.item_grants if not g.is_noop()]
 
 
 class QuestSeed(BaseModel):
@@ -305,11 +341,21 @@ EXTRACT_JSON_SHAPE = (
     f'      "status": one of {list(ENTITY_STATUSES)} | null,\n'
     f'      "disposition": one of {list(DISPOSITIONS)} | null,\n'
     '      "note": one short factual clause to remember | null,\n'
+    '      "commitment": a promise/standing-fact/attitude-shift this NPC just made toward the party that must persist (e.g. "答應帶路去地窖") | null,\n'
     f'      "add_conditions": subset of {_KNOWN_CONDITION_IDS} | []  // attach mechanical flags the narration newly implies,\n'
     '      "remove_conditions": [condition ids the narration shows are gone] | [],\n'
     f'      "register_kind": one of {list(ENTITY_KINDS)} | null  // only for a NEW entity,\n'
     '      "register_name": name of the new entity | null,\n'
     '      "aliases": [other names for the new entity]\n'
+    '    }\n'
+    '  ],\n'
+    '  "item_grants": [\n'
+    '    {\n'
+    '      "item_name": item that was actually acquired/transferred/rewarded,\n'
+    '      "recipient_ref": actor name/alias receiving it, or null for the acting PC,\n'
+    '      "quantity": positive integer, default 1,\n'
+    f'      "category": one of {list(ITEM_CATEGORIES)} | null,\n'
+    '      "source_ref": scene entity/source that plausibly provided it | null\n'
     '    }\n'
     '  ],\n'
     '  "location_note": one lasting change to the PLACE itself, not tied to a person/object (e.g. "絆線已被拆除") | null\n'

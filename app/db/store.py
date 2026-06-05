@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from ..config import settings
+from ..content import items as item_catalog
 from ..content import quest_taxonomy
 from ..logging_setup import get_logger
 
@@ -30,6 +31,8 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 ENTITY_KINDS = ("person", "object", "location", "creature")
 ENTITY_STATUSES = ("present", "departed", "hidden", "dead", "destroyed", "unknown")
 DISPOSITIONS = ("friendly", "neutral", "wary", "afraid", "hostile", "attack", "cowed")
+ITEM_CATEGORIES = ("weapon", "armor", "shield", "consumable", "gear", "treasure", "key_item", "misc")
+EQUIP_SLOTS = ("main_hand", "off_hand", "armor", "trinket")
 
 # Entities the narrator should NOT treat as "in the scene right now".
 _ABSENT_STATUSES = {"departed", "dead", "destroyed"}
@@ -99,6 +102,8 @@ def reset_world() -> None:
         c.execute("DELETE FROM quests")
         c.execute("DELETE FROM memory_chunks")
         c.execute("DELETE FROM mention_tally")
+        c.execute("DELETE FROM actor_inventory")
+        c.execute("DELETE FROM items")
         c.commit()
         log.info("db: world reset")
 
@@ -160,6 +165,344 @@ def _quest_to_dict(row: sqlite3.Row) -> dict:
             d[key] = {}
     d["tags"] = quest_taxonomy.normalize_tags(d.get("tags"))
     return d
+
+
+def _coerce_item_category(value: str | None) -> str:
+    return value if value in ITEM_CATEGORIES else "misc"
+
+
+def _coerce_equip_slot(value: str | None) -> str | None:
+    return value if value in EQUIP_SLOTS else None
+
+
+def _json_list(value: str | None) -> list:
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _json_dict(value: str | None) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _item_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d["aliases"] = _json_list(d.get("aliases"))
+    d["metadata"] = _json_dict(d.get("metadata"))
+    d["stackable"] = bool(d.get("stackable"))
+    return d
+
+
+def _inventory_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d["aliases"] = _json_list(d.get("aliases"))
+    d["metadata"] = _json_dict(d.get("metadata"))
+    d["instance_state"] = _json_dict(d.get("instance_state"))
+    d["stackable"] = bool(d.get("stackable"))
+    d["equipped"] = bool(d.get("equipped"))
+    return d
+
+
+def _item_aliases(existing: list | None, additions: list | None) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for value in [*(existing or []), *(additions or [])]:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        key = item_catalog.normalize_name(text)
+        if text and key and key not in seen:
+            seen.add(key)
+            merged.append(text)
+    return merged
+
+
+def register_item(
+    name: str,
+    *,
+    item_id: str | None = None,
+    category: str = "misc",
+    slot: str | None = None,
+    description: str = "",
+    aliases: list[str] | None = None,
+    metadata: dict | None = None,
+    source: str = "dynamic",
+    stackable: bool = True,
+) -> str:
+    """Register or find a canonical item definition by normalized name."""
+    display_name = (name or "").strip()
+    if not display_name:
+        raise ValueError("item name is required")
+    norm = item_catalog.normalize_name(display_name)
+    category = _coerce_item_category(category)
+    slot = _coerce_equip_slot(slot)
+    now = _now()
+    with _lock:
+        c = _c()
+        row = c.execute("SELECT * FROM items WHERE norm_name=?", (norm,)).fetchone()
+        if row is None and item_id:
+            row = c.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if row:
+            item = _item_to_dict(row)
+            merged_aliases = _item_aliases(item.get("aliases"), aliases)
+            if display_name != item.get("name"):
+                merged_aliases = _item_aliases(merged_aliases, [display_name])
+            merged_metadata = {**(item.get("metadata") or {}), **(metadata or {})}
+            c.execute(
+                "UPDATE items SET aliases=?, category=?, slot=?, description=?, "
+                "stackable=?, metadata=?, source=?, updated_ts=? WHERE id=?",
+                (
+                    json.dumps(merged_aliases, ensure_ascii=False),
+                    category if category != "misc" or item.get("category") == "misc" else item.get("category"),
+                    slot if slot is not None else item.get("slot"),
+                    description or item.get("description") or "",
+                    1 if stackable else 0,
+                    json.dumps(merged_metadata, ensure_ascii=False),
+                    item.get("source") or source,
+                    now,
+                    item["id"],
+                ),
+            )
+            c.commit()
+            return item["id"]
+        new_id = item_id or f"item_{uuid.uuid4().hex[:10]}"
+        c.execute(
+            "INSERT INTO items (id, norm_name, name, aliases, category, slot, description, "
+            "stackable, metadata, source, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                new_id,
+                norm,
+                display_name,
+                json.dumps(_item_aliases([], aliases), ensure_ascii=False),
+                category,
+                slot,
+                description or "",
+                1 if stackable else 0,
+                json.dumps(metadata or {}, ensure_ascii=False),
+                source or "dynamic",
+                now,
+                now,
+            ),
+        )
+        c.commit()
+        return new_id
+
+
+def find_item_by_ref(ref: str) -> dict | None:
+    """Resolve an item by id, normalized name, or alias."""
+    if not ref or not ref.strip():
+        return None
+    key = item_catalog.normalize_name(ref)
+    with _lock:
+        c = _c()
+        row = c.execute("SELECT * FROM items WHERE id=? OR norm_name=?", (ref.strip(), key)).fetchone()
+        if row:
+            return _item_to_dict(row)
+        rows = c.execute("SELECT * FROM items ORDER BY created_ts").fetchall()
+    for row in rows:
+        item = _item_to_dict(row)
+        names = [item.get("name"), *(item.get("aliases") or [])]
+        if any(item_catalog.normalize_name(n or "") == key for n in names):
+            return item
+    return None
+
+
+def grant_item(
+    actor_id: str,
+    item_ref: str,
+    *,
+    quantity: int = 1,
+    category: str | None = None,
+    slot: str | None = None,
+    event_id: str | None = None,
+    aliases: list[str] | None = None,
+    description: str = "",
+    metadata: dict | None = None,
+    source: str = "dynamic",
+    stackable: bool = True,
+) -> dict:
+    """Grant an item to an actor, lazily creating the catalog row only on acquisition."""
+    if not actor_id or not actor_id.strip():
+        raise ValueError("actor_id is required")
+    qty = max(1, int(quantity or 1))
+    item = find_item_by_ref(item_ref)
+    if item is None:
+        item_id = register_item(
+            item_ref,
+            category=category or "misc",
+            slot=slot,
+            aliases=aliases,
+            description=description,
+            metadata=metadata,
+            source=source,
+            stackable=stackable,
+        )
+        item = find_item_by_ref(item_id)
+    elif aliases or category or slot or description or metadata:
+        register_item(
+            item["name"],
+            item_id=item["id"],
+            category=category or item.get("category") or "misc",
+            slot=slot if slot is not None else item.get("slot"),
+            aliases=aliases,
+            description=description or item.get("description") or "",
+            metadata={**(item.get("metadata") or {}), **(metadata or {})},
+            source=item.get("source") or source,
+            stackable=bool(item.get("stackable", stackable)),
+        )
+        item = find_item_by_ref(item["id"])
+    assert item is not None
+    now = _now()
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT * FROM actor_inventory WHERE actor_id=? AND item_id=?",
+            (actor_id, item["id"]),
+        ).fetchone()
+        if row:
+            c.execute(
+                "UPDATE actor_inventory SET quantity=quantity+?, acquired_event_id=?, acquired_ts=? "
+                "WHERE id=?",
+                (qty, event_id or row["acquired_event_id"], now, row["id"]),
+            )
+        else:
+            c.execute(
+                "INSERT INTO actor_inventory (id, actor_id, item_id, quantity, equipped, "
+                "instance_state, acquired_event_id, acquired_ts) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    f"inv_{uuid.uuid4().hex[:10]}",
+                    actor_id,
+                    item["id"],
+                    qty,
+                    0,
+                    "{}",
+                    event_id,
+                    now,
+                ),
+            )
+        c.commit()
+    return get_inventory_item(actor_id, item["id"]) or item
+
+
+def get_inventory_item(actor_id: str, item_ref: str) -> dict | None:
+    item = find_item_by_ref(item_ref)
+    if item is None:
+        return None
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT ai.*, it.norm_name, it.name, it.aliases, it.category, it.slot, "
+            "it.description, it.stackable, it.metadata, it.source "
+            "FROM actor_inventory ai JOIN items it ON it.id=ai.item_id "
+            "WHERE ai.actor_id=? AND ai.item_id=?",
+            (actor_id, item["id"]),
+        ).fetchone()
+    return _inventory_to_dict(row) if row else None
+
+
+def get_inventory(actor_id: str) -> list[dict]:
+    with _lock:
+        c = _c()
+        rows = c.execute(
+            "SELECT ai.*, it.norm_name, it.name, it.aliases, it.category, it.slot, "
+            "it.description, it.stackable, it.metadata, it.source "
+            "FROM actor_inventory ai JOIN items it ON it.id=ai.item_id "
+            "WHERE ai.actor_id=? ORDER BY it.category, it.name",
+            (actor_id,),
+        ).fetchall()
+    return [_inventory_to_dict(r) for r in rows]
+
+
+def project_inventory(actor_id: str) -> list[str]:
+    """Legacy Character.inventory projection used by the implausible gate."""
+    names: list[str] = []
+    for row in get_inventory(actor_id):
+        qty = int(row.get("quantity") or 1)
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        label = str(metadata.get("projection_name") or row.get("name") or "")
+        if qty > 1:
+            label = f"{label} x{qty}"
+        if label:
+            names.append(label)
+    return names
+
+
+def remove_item(actor_id: str, item_ref: str, quantity: int = 1) -> bool:
+    item = find_item_by_ref(item_ref)
+    if item is None:
+        return False
+    qty = max(1, int(quantity or 1))
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT * FROM actor_inventory WHERE actor_id=? AND item_id=?",
+            (actor_id, item["id"]),
+        ).fetchone()
+        if not row:
+            return False
+        remaining = int(row["quantity"] or 0) - qty
+        if remaining > 0:
+            c.execute("UPDATE actor_inventory SET quantity=? WHERE id=?", (remaining, row["id"]))
+        else:
+            c.execute("DELETE FROM actor_inventory WHERE id=?", (row["id"],))
+        c.commit()
+    return True
+
+
+def transfer_item(src_actor_id: str, dst_actor_id: str, item_ref: str, quantity: int = 1) -> bool:
+    item = find_item_by_ref(item_ref)
+    if item is None:
+        return False
+    inv = get_inventory_item(src_actor_id, item["id"])
+    if not inv or int(inv.get("quantity") or 0) < max(1, int(quantity or 1)):
+        return False
+    remove_item(src_actor_id, item["id"], quantity)
+    grant_item(dst_actor_id, item["id"], quantity=quantity)
+    return True
+
+
+def set_equipped(actor_id: str, item_ref: str, equipped: bool) -> bool:
+    item = find_item_by_ref(item_ref)
+    if item is None:
+        return False
+    if item.get("slot") not in EQUIP_SLOTS:
+        return False
+    with _lock:
+        c = _c()
+        row = c.execute(
+            "SELECT id FROM actor_inventory WHERE actor_id=? AND item_id=?",
+            (actor_id, item["id"]),
+        ).fetchone()
+        if not row:
+            return False
+        c.execute("UPDATE actor_inventory SET equipped=? WHERE id=?", (1 if equipped else 0, row["id"]))
+        c.commit()
+    return True
+
+
+def seed_items(defs: list[dict]) -> None:
+    """Insert authored item definitions without overwriting runtime quantities."""
+    for d in defs:
+        name = d.get("name")
+        if not name:
+            continue
+        register_item(
+            name,
+            item_id=d.get("id"),
+            category=d.get("category", "misc"),
+            slot=d.get("slot"),
+            description=d.get("description", ""),
+            aliases=d.get("aliases", []),
+            metadata=d.get("metadata", {}),
+            source=d.get("source", "seed"),
+            stackable=bool(d.get("stackable", True)),
+        )
 
 
 def fallback_quest_details(seed: dict) -> dict:
@@ -672,6 +1015,32 @@ def location_travel_cost(loc_id: str) -> int:
 
 
 # ───────────────────────── mention tally (debounced auto-register) ─────────────────────────
+def register_combatant(
+    scene_id: str | None, name: str, kind: str, *,
+    disposition: str = "neutral", aliases: list[str] | None = None, note: str = "",
+) -> str | None:
+    """Register a present, combat-capable entity IMMEDIATELY — bypassing the AI-mention
+    debounce (record_mention threshold). Reserved for the moment a foe actually enters
+    play: an AI-narrated hostile, or an explicit player attack on an as-yet-unregistered
+    target. A player's blade landing on someone is authoritative the same way a travel
+    target is (see resolve_or_register_location). Returns the entity id (existing or new),
+    or None for an empty name. No-op-merges onto an existing ref rather than duplicating."""
+    if not name or not name.strip():
+        return None
+    existing = find_by_ref(scene_id, name)
+    if existing is not None:
+        return existing["id"]
+    ent_id = f"ent_{uuid.uuid4().hex[:10]}"
+    upsert_entity(
+        id=ent_id, scene_id=scene_id,
+        kind=kind if kind in ENTITY_KINDS else "creature",
+        name=name.strip(), aliases=aliases or [], status="present",
+        disposition=disposition if disposition in DISPOSITIONS else "neutral",
+        notes=note or "",
+    )
+    return ent_id
+
+
 def record_mention(scene_id: str | None, name: str, kind: str) -> int:
     """Count one prose mention of a not-yet-registered entity in this location scope.
     Returns the new running count, or 0 if `name` already maps to a registered entity
@@ -923,6 +1292,8 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
             aliases=delta.get("aliases", []), status=delta.get("status", "present"),
             disposition=delta.get("disposition"), notes=delta.get("note", ""),
         )
+        if delta.get("commitment"):
+            append_entity_commitment(ent_id, delta["commitment"])
         return ent_id
 
     # Merge updates onto the existing entity.
@@ -965,6 +1336,10 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
     for cid in delta.get("remove_conditions") or []:
         if isinstance(cid, str) and cid:
             remove_condition(ent["id"], cid)
+    # Durable promise/standing fact this NPC made → flags so it is re-injected every
+    # turn (like agenda) and never scrolls out of the event window.
+    if delta.get("commitment"):
+        append_entity_commitment(ent["id"], delta["commitment"])
     return ent["id"]
 
 
@@ -998,6 +1373,41 @@ def location_state_note(location_id: str) -> str:
     if not loc or loc.get("kind") != "location":
         return ""
     return ((loc.get("flags") or {}).get("state_notes") or "").strip()
+
+
+# ───────────────────────── entity commitments ─────────────────────────
+def append_entity_commitment(entity_id: str, text: str) -> bool:
+    """Record a durable promise / standing fact / attitude shift an NPC made toward the
+    party (e.g. '答應帶路去地窖'). Stored on the entity's flags so it is re-injected into
+    every narration regardless of the event window. De-duped and capped. Returns True if
+    written."""
+    if not entity_id or not text or not text.strip():
+        return False
+    ent = get_entity_by_id(entity_id)
+    if not ent:
+        return False
+    flags = dict(ent.get("flags") or {})
+    existing = [c for c in (flags.get("commitments") or []) if isinstance(c, str)]
+    clean = text.strip()
+    if clean in existing:
+        return False
+    # Keep the most recent few; older promises usually fold into newer ones.
+    flags["commitments"] = (existing + [clean])[-6:]
+    upsert_entity(
+        id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
+        aliases=ent.get("aliases", []), status=ent["status"],
+        location_id=ent.get("location_id"), disposition=ent.get("disposition"),
+        flags=flags, notes=ent.get("notes", ""),
+        first_seen_event_id=ent.get("first_seen_event_id"),
+    )
+    return True
+
+
+def entity_commitments(entity: dict) -> list[str]:
+    """The durable commitments recorded on an entity dict (may be empty)."""
+    flags = entity.get("flags") or {}
+    raw = flags.get("commitments") if isinstance(flags, dict) else None
+    return [c for c in (raw or []) if isinstance(c, str)]
 
 
 # ───────────────────────── scene_state ─────────────────────────

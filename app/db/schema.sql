@@ -112,6 +112,35 @@ CREATE TABLE IF NOT EXISTS mention_tally (
 
 -- ── RAG memory (design §5.3 / §8.0). Reserved for the next phase: created here so
 --    the schema is complete, but no code reads/writes it yet (embeddings deferred).
+CREATE TABLE IF NOT EXISTS items (
+    id          TEXT PRIMARY KEY,
+    norm_name   TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    aliases     TEXT NOT NULL DEFAULT '[]',
+    category    TEXT NOT NULL DEFAULT 'misc',
+    slot        TEXT,
+    description TEXT NOT NULL DEFAULT '',
+    stackable   INTEGER NOT NULL DEFAULT 1,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    source      TEXT NOT NULL DEFAULT 'dynamic',
+    created_ts  REAL NOT NULL,
+    updated_ts  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS actor_inventory (
+    id                TEXT PRIMARY KEY,
+    actor_id          TEXT NOT NULL,
+    item_id           TEXT NOT NULL,
+    quantity          INTEGER NOT NULL DEFAULT 1,
+    equipped          INTEGER NOT NULL DEFAULT 0,
+    instance_state    TEXT NOT NULL DEFAULT '{}',
+    acquired_event_id TEXT,
+    acquired_ts       REAL NOT NULL,
+    UNIQUE(actor_id, item_id),
+    FOREIGN KEY(item_id) REFERENCES items(id)
+);
+CREATE INDEX IF NOT EXISTS idx_actor_inventory_actor ON actor_inventory(actor_id);
+
 CREATE TABLE IF NOT EXISTS memory_chunks (
     id          TEXT PRIMARY KEY,
     scene_id    TEXT,

@@ -154,6 +154,15 @@ _ELITE_WORDS = (
     "boss", "captain", "chief", "leader", "elite", "veteran",
     "首領", "隊長", "頭目", "精英", "老練", "菁英",
 )
+# Humanoid (person) cues used only when a free-text combat target carries no
+# registry record — to decide person vs creature for a materialised combatant.
+_PERSON_WORDS = (
+    "酒保", "老闆", "掌櫃", "商人", "村民", "農夫", "侍者", "店主", "旅人", "祭司",
+    "貴族", "男人", "女人", "老人", "孩子", "女子", "男子", "婦人", "和尚", "法師",
+    "刺客", "盜賊", "弓手", "船長", "領主", "管家",
+    "bartender", "innkeeper", "merchant", "villager", "priest", "noble", "man",
+    "woman", "thief", "assassin", "archer", "captain", "lord", "wizard",
+)
 
 
 def _entity_text(entity: dict) -> str:
@@ -173,6 +182,49 @@ def archetype_for_entity(entity: dict) -> str:
     if any(word in text for word in _THUG_WORDS):
         return "thug"
     return "commoner"
+
+
+# Disposition cues for a materialised attack target with no registry record. Obviously
+# malicious things start `hostile` (combat begins on the first swing); plainly peaceful
+# folk start `friendly` (they tolerate two swings before fighting back); everything else
+# is `neutral`. Reuses the thug list — a "bandit" reads as hostile, not just a brawler type.
+_HOSTILE_WORDS = _THUG_WORDS + (
+    "哥布林", "狗頭人", "怪物", "魔物", "巨魔", "食人魔", "不死", "亡靈", "骷髏", "殭屍",
+    "喪屍", "惡魔", "魔王", "刺客", "盜賊", "海盜", "野蠻人",
+    "goblin", "kobold", "monster", "troll", "ogre", "undead", "skeleton", "zombie",
+    "demon", "fiend", "assassin", "pirate", "barbarian",
+)
+_PEACEFUL_WORDS = (
+    "酒保", "老闆", "掌櫃", "商人", "村民", "農夫", "侍者", "店主", "旅人", "婦人",
+    "孩子", "老人", "女子", "男子", "祭司", "僧侶", "和尚", "管家",
+    "bartender", "innkeeper", "merchant", "villager", "priest", "monk", "child",
+)
+
+
+def infer_disposition(text: str) -> str:
+    """Guess the starting attitude of a materialised, unregistered attack target. Drives the
+    provocation ladder: hostile → combat now; friendly → tolerates two swings; neutral → one."""
+    low = (text or "").lower()
+    if any(word in low for word in _HOSTILE_WORDS):
+        return "hostile"
+    if any(word in low for word in _PEACEFUL_WORDS):
+        return "friendly"
+    return "neutral"
+
+
+def infer_combat_kind(text: str) -> str:
+    """Guess whether a free-text combat target is a `person` (humanoid) or a
+    `creature` (beast/monster). Used when an enemy materialises mid-play and no
+    registry record exists to read `kind` from. Beast cues win first (a "wolf"
+    is a creature even if the sentence mentions a person); explicit humanoid cues
+    map to `person`; everything else defaults to `creature` (most narrated foes in
+    this game are monsters, and `creature` maps cleanly to the beast archetype)."""
+    low = (text or "").lower()
+    if any(word in low for word in _BEAST_WORDS):
+        return "creature"
+    if any(word in low for word in _PERSON_WORDS + _GUARD_WORDS + _THUG_WORDS):
+        return "person"
+    return "creature"
 
 
 def _elite_adjustment(character: Character, entity: dict) -> Character:
