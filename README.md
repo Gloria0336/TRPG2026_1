@@ -111,7 +111,7 @@ python -m pip install -e ".[dev]"
 ## 執行
 
 ```powershell
-python -m app.run
+app.run
 ```
 
 - Discord bot 會連線，儀表板會在 **http://127.0.0.1:8000** 提供服務。
@@ -121,7 +121,7 @@ python -m app.run
 ### 正確關閉與「重複啟動」處理
 
 這個專案一次只能跑一個 `python -m app.run`。Discord bot 和 Web dashboard 共用同一個 in-memory `GameState`，如果開兩個程序，它們會搶同一個 Discord token 和 `8000` port，所以第二個程序會拒絕啟動並顯示「已有另一個實例在執行中」。
-
+python -m 
 正常關閉方式：
 
 ```powershell

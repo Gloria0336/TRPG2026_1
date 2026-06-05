@@ -64,6 +64,18 @@ def test_frightened_gives_advantage_against():
     assert d.advantage is True
 
 
+def test_cowed_condition_auto_succeeds_intimidation():
+    d = conditions.evaluate_gate([conditions.COWED], approach="intimidation")
+    assert d.outcome is CheckOutcome.AUTO_SUCCESS
+
+
+def test_trusted_condition_auto_succeeds_diplomacy_only():
+    d_talk = conditions.evaluate_gate([conditions.TRUSTED], approach="diplomacy")
+    d_threaten = conditions.evaluate_gate([conditions.TRUSTED], approach="intimidation")
+    assert d_talk.outcome is CheckOutcome.AUTO_SUCCESS
+    assert d_threaten.outcome is CheckOutcome.ROLL
+
+
 # ───────────────────────── store helpers ─────────────────────────
 def test_add_remove_condition_round_trip():
     store.upsert_entity(id="ent_x", scene_id="tavern", kind="person", name="Test")
@@ -141,6 +153,25 @@ def test_requires_check_still_forces_roll_when_no_gate():
     )
     # No condition on the target → the contested-skill gate is back in force.
     assert resolution.requires_check(gs, intent) is True
+
+
+def test_cowed_disposition_yields_to_intimidation_short_circuit():
+    gs = game_state.reset_state(channel_id=1)
+    store.apply_delta(gs.current_location_id, {
+        "entity_ref": "兜帽客",
+        "disposition": "cowed",
+    })
+
+    intent = Intent(
+        actor_id="pc_bram", raw_text="再威嚇兜帽客", tier=IntentTier.A,
+        action="intimidate", approach="intimidation", target="兜帽客",
+        needs_check=True,
+    )
+    assert resolution.requires_check(gs, intent) is False
+    result = resolution.resolve(gs, intent)
+    assert result.band is ResultBand.SUCCESS
+    assert "短路" in result.summary
+    assert any("屈服" in d for d in result.deltas)
 
 
 # ───────────────────────── auto-apply on successful spell ─────────────────────────
@@ -281,6 +312,21 @@ def test_indebted_to_actor_auto_succeeds():
     assert result.band is ResultBand.SUCCESS
 
 
+def test_trusted_target_auto_succeeds_diplomacy():
+    gs = game_state.reset_state(channel_id=1)
+    store.add_condition("ent_perrin", conditions.TRUSTED)
+
+    intent = Intent(
+        actor_id="pc_bram", raw_text="請佩林相信我們並協助", tier=IntentTier.A,
+        action="persuade", approach="persuasion", target="佩林",
+        needs_check=True,
+    )
+    assert resolution.requires_check(gs, intent) is False
+    result = resolution.resolve(gs, intent)
+    assert result.band is ResultBand.SUCCESS
+    assert any("信任" in d for d in result.deltas)
+
+
 def test_lying_target_grants_insight_advantage():
     # PF2e Sense Motive is a Perception action — Lying grants advantage on perception.
     d = conditions.evaluate_gate([conditions.LYING], approach="perception")
@@ -341,9 +387,9 @@ def test_schema_drops_unknown_conditions():
     from app.ai.schemas import EntityStateDelta
     d = EntityStateDelta(
         entity_ref="兜帽客",
-        add_conditions=[conditions.HYPNOTIZED, "lol_not_real", "made_up_flag"],
+        add_conditions=[conditions.HYPNOTIZED, conditions.TRUSTED, conditions.COWED, "lol_not_real", "made_up_flag"],
     )
-    assert d.add_conditions == [conditions.HYPNOTIZED]
+    assert d.add_conditions == [conditions.HYPNOTIZED, conditions.TRUSTED, conditions.COWED]
 
 
 def test_parametric_condition_known_and_labelled():

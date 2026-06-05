@@ -67,9 +67,9 @@ def test_ability_check_uses_external_bonus_and_surfaces_in_breakdown():
 def test_opposed_check_dc_is_10_plus_defender_mod():
     """§4.10: 被動方轉靜態 DC = 10 + 被動 mod."""
     bram, lyra = premade_pcs()
-    # Lyra's diplomacy: CHA +1, proficient +2 → +3. Static DC must be 13.
+    # Lyra's diplomacy: CHA 14(+2), trained +2 → +4. Static DC must be 14.
     res = rules_5e.opposed_check(bram, lyra, "intimidation", "diplomacy")
-    assert res.dc == 13
+    assert res.dc == 14
 
 
 def test_opposed_check_sets_target_and_summary_mentions_defense():

@@ -58,6 +58,10 @@ SKILL_ZH = {
 ACTION_ZH = {
     "Longsword": "長劍",
     "Heavy Crossbow": "重弩",
+    "Catch Breath": "喘息",
+    "Divine Lance": "神聖光矛",
+    "Heal": "治療術",
+    "Healing Font": "治療之泉",
     "Second Wind": "回氣",
     "Mace": "硬頭鎚",
     "Sacred Flame": "聖焰",
@@ -74,6 +78,15 @@ CONDITION_ZH = {
     "unconscious": "昏迷",
     "stable": "穩定",
     "dead": "死亡",
+    "charmed": "魅惑",
+    "hypnotized": "催眠",
+    "dominated": "支配",
+    "frightened": "恐懼",
+    "restrained": "束縛",
+    "trusted": "信任",
+    "cowed": "屈服",
+    "already_resolved": "已招供",
+    "under_duress": "被脅迫",
 }
 
 OUTCOME_ZH = {

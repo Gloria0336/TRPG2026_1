@@ -794,9 +794,10 @@ clearly shifts. Use `disposition`:"attack" only when that NPC has clearly decide
 start violence now and should pull the party into turn-based combat.
 - Use `add_conditions` / `remove_conditions` ONLY when the narration shows the entity \
 *newly* gained or *clearly lost* a mechanical state — e.g. tied up → add ["restrained"], \
-the figure awoke → remove ["unconscious", "hypnotized"]. Pick ids from the allowed list \
-in the JSON shape; unknown ids are silently dropped. Do NOT re-report conditions the \
-entity already has.
+the figure awoke → remove ["unconscious", "hypnotized"], fully trusts the party → \
+add ["trusted"], breaks and submits under threats → add ["cowed"]. Pick ids from the \
+allowed list in the JSON shape; unknown ids are silently dropped. Do NOT re-report \
+conditions the entity already has.
 - Set `register_kind`/`register_name` for anything genuinely NEW and not already listed: \
 a person/creature/object that appears, OR a named place the narration introduces (use \
 `register_kind`:"location"). Reporting a new place is just a candidate — the engine \

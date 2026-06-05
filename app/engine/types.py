@@ -105,6 +105,36 @@ def proficiency_rank_bonus(rank: str | ProficiencyRank | None, level: int) -> in
     }[normalized]
 
 
+# PF2e has three saves, each driven by one ability (character_format_v1.0.md §1.5):
+SAVE_ABILITY: dict[str, str] = {"fortitude": "CON", "reflex": "DEX", "will": "WIS"}
+# Map an ability key to the save it governs. PF2e has no STR/INT/CHA save, so those
+# fold onto the nearest save (STR→Fort, INT/CHA→Will) for engine save-spell calls.
+ABILITY_TO_SAVE: dict[str, str] = {
+    "STR": "fortitude", "CON": "fortitude",
+    "DEX": "reflex",
+    "INT": "will", "WIS": "will", "CHA": "will",
+}
+
+
+def _normalize_save_prof(value: object) -> dict[str, str]:
+    """Normalize save proficiencies to the PF2e three-save dict {fort/ref/will: rank}.
+
+    Back-compat: legacy 5e snapshots stored a list of proficient ability keys
+    (e.g. ["STR","CON"]); fold each onto its governing PF2e save at `trained`.
+    """
+    if isinstance(value, dict):
+        return {
+            str(k).lower(): normalize_proficiency_rank(v)
+            for k, v in value.items()
+            if normalize_proficiency_rank(v) != ProficiencyRank.UNTRAINED.value
+        }
+    out: dict[str, str] = {}
+    for ability in value or []:
+        save = ABILITY_TO_SAVE.get(str(ability).upper(), "will")
+        out[save] = ProficiencyRank.TRAINED.value
+    return out
+
+
 # ───────────────────────── Damage / actions ─────────────────────────
 @dataclass
 class Damage:
@@ -190,27 +220,70 @@ class Character:
     movement_base: float = 4.0
     is_vehicle: bool = False
     vehicle_type: str | None = None
+
+    # ── PF2e build: origin (character_format_v1.0.md §1.2) ──
+    ancestry: str = ""
+    heritage: str = ""
+    background: str = ""
+    size: str = "medium"
+    traits: list[str] = field(default_factory=list)
+    languages: list[str] = field(default_factory=list)
+    senses: list[str] = field(default_factory=list)
+    # ── PF2e build: class (§1.3) ──
+    class_: str = ""
+    key_ability: str = "STR"                   # class key ability → class DC
+    class_hp: int = 8                           # class HP per level (HP derivation)
+    class_features: list[str] = field(default_factory=list)
+    subclass: str | None = None
+
     # skill name -> ProficiencyRank value (legacy "prof"/"expertise" accepted on load)
     skill_prof: dict[str, str] = field(default_factory=dict)
     skill_points: int = 0
     lore_prof: dict[str, str] = field(default_factory=dict)
+    # ── PF2e proficiencies, all five-step ranks (§1.5) ──
+    perception_prof: str = "untrained"
+    # PF2e three saves: {"fortitude"/"reflex"/"will": rank}. A legacy list of ability
+    # keys is converted on load (see from_dict / _normalize_save_prof).
+    save_prof: dict[str, str] = field(default_factory=dict)
+    attack_prof: dict[str, str] = field(default_factory=dict)   # unarmed/simple/martial/advanced
+    defense_prof: dict[str, str] = field(default_factory=dict)  # unarmored/light/medium/heavy
+    class_dc_prof: str = "untrained"
+    spell_prof: str = "untrained"
+
     guild_rank: str = "F"
     merit: int = 0
     standing: int = 0
     rank_flags: dict[str, object] = field(default_factory=dict)
-    save_prof: list[str] = field(default_factory=list)  # proficient saving-throw abilities
     actions: list[Action] = field(default_factory=list)
     conditions: list[str] = field(default_factory=list)
     # Per-condition data (level / source / duration). Parallel to `conditions`;
     # key is the condition id (incl. parametric "loyal_to:X"). See app.engine.conditions.
     condition_meta: dict[str, dict] = field(default_factory=dict)
+
+    # ── PF2e defenses (§1.6) ──
+    temp_hp: int = 0
+    resistances: dict[str, int] = field(default_factory=dict)
+    weaknesses: dict[str, int] = field(default_factory=dict)
+    immunities: list[str] = field(default_factory=list)
+    speeds: dict[str, int] | None = None        # fly/swim/climb/burrow
+
+    # ── PF2e feats & spellcasting (§1.8 / §1.9), stored as plain JSON-able structures ──
+    feats: list[dict] = field(default_factory=list)
+    spellcasting: dict | None = None
+
+    # PF2e dying track (§1.12) — the standard death model. The 5e death-save fields
+    # below remain until the combat engine is converted (out of this refactor's scope).
+    dying: int = 0
+    wounded: int = 0
+    doomed: int = 0
+    hero_points: int = 0
     # 5e death saving throws (PCs only): successes/failures, and a "stable"/"dead" marker
     death_successes: int = 0
     death_failures: int = 0
     portrait: str = "🧝"                        # emoji shown in embeds/dashboard
     blurb: str = ""                             # one-line flavour for onboarding
-    # Carried items (free-text). Read by the intent parser so a player can't conjure gear
-    # they don't have (design: AI never invents facts). Not a full PF2e inventory yet.
+    # Carried items (free-text projection cache; real source is the store/inventory layer).
+    # Read by the intent parser so a player can't conjure gear they don't have.
     inventory: list[str] = field(default_factory=list)
 
     # ── derived helpers ──
@@ -243,10 +316,15 @@ class Character:
         return normalize_proficiency_rank(self.skill_prof.get(skill)) in TRAINED_RANKS
 
     def save_bonus(self, ability: Ability | str) -> int:
-        key = ability.value if isinstance(ability, Ability) else ability
-        bonus = self.mod(key)
-        if key in self.save_prof:
-            bonus += self.prof_bonus
+        """PF2e three-save model: bonus = save's ability mod + rank_bonus(save rank).
+
+        Accepts either a save name ("fortitude"/"reflex"/"will") or an ability key;
+        an ability is mapped to the save it governs (Fort=CON, Ref=DEX, Will=WIS).
+        """
+        key = ability.value if isinstance(ability, Ability) else str(ability)
+        save = key.lower() if key.lower() in SAVE_ABILITY else ABILITY_TO_SAVE.get(key.upper(), "will")
+        bonus = self.mod(SAVE_ABILITY[save])
+        bonus += proficiency_rank_bonus(self.save_prof.get(save), self.level)
         return bonus
 
     def find_action(self, name: str) -> Action | None:
@@ -278,6 +356,8 @@ class Character:
             for k, v in dict(d.get("lore_prof", {})).items()
             if normalize_proficiency_rank(v) != ProficiencyRank.UNTRAINED.value
         }
+        # PF2e three-save dict; converts a legacy 5e ability-key list on load.
+        d["save_prof"] = _normalize_save_prof(d.get("save_prof", {}))
         d.setdefault("skill_points", 0)
         d.setdefault("guild_rank", "F")
         d.setdefault("merit", 0)

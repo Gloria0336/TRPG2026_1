@@ -7,14 +7,15 @@ from app.engine.types import Character
 
 def test_bounded_rank_bonus_preserves_existing_trained_math():
     bram, _ = premade_pcs()
-    assert bram.skill_bonus("athletics") == 5
+    # Bram: Athletics expert, STR 18(+4), level 3 → expert rank +4 → +8
+    assert bram.skill_bonus("athletics") == 8
 
-    bram.skill_prof["athletics"] = "expert"
-    assert bram.skill_bonus("athletics") == 7
+    bram.skill_prof["athletics"] = "trained"
+    assert bram.skill_bonus("athletics") == 6  # STR +4, trained rank +2
 
     bram.level = 20
     bram.skill_prof["athletics"] = "legendary"
-    assert bram.skill_bonus("athletics") == 15  # STR +3, bounded rank +12
+    assert bram.skill_bonus("athletics") == 16  # STR +4, bounded rank +12
 
 
 def test_legacy_prof_values_load_as_new_ranks():

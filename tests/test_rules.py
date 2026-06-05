@@ -20,13 +20,15 @@ def test_proficiency_bonus():
 
 def test_skill_and_save_bonuses():
     bram, lyra = premade_pcs()
-    # Bram: Athletics proficient, STR 16(+3), prof +2 → +5
-    assert bram.skill_bonus("athletics") == 5
-    # Lyra: not proficient in athletics, STR 12(+1) → +1
-    assert lyra.skill_bonus("athletics") == 1
-    # Bram saves: STR proficient → +3 +2 = +5; DEX not → +1
-    assert bram.save_bonus("STR") == 5
-    assert bram.save_bonus("DEX") == 1
+    # Bram: Athletics expert, STR 18(+4), expert rank +4 → +8
+    assert bram.skill_bonus("athletics") == 8
+    # Lyra: untrained in athletics, STR 10(+0) → +0
+    assert lyra.skill_bonus("athletics") == 0
+    # PF2e three saves: STR→Fortitude (CON 14 +2, expert +4) → +6; DEX→Reflex (expert) → +6
+    assert bram.save_bonus("STR") == 6
+    assert bram.save_bonus("DEX") == 6
+    # Will is only trained on Bram: WIS 12(+1) + trained +2 → +3
+    assert bram.save_bonus("will") == 3
 
 
 def test_nearest_anchor():
@@ -132,7 +134,7 @@ def test_attack_applies_damage_on_hit():
 
 def test_heal_action_caps_at_max():
     _, lyra = premade_pcs()
-    cure = lyra.find_action("Cure Wounds")
+    cure = lyra.find_action("Heal")
     lyra.hp = 1
     res = rules_5e.heal(lyra, lyra, cure)
     assert lyra.hp <= lyra.max_hp

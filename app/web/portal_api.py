@@ -198,7 +198,7 @@ def _character_from_request(data: CharacterCreateRequest, user_id: str) -> Chara
         hp=profile["max_hp"],
         ac=profile["ac"],
         skill_prof={},
-        save_prof=[],
+        save_prof={},
         portrait=data.portrait.strip() or "星",
         blurb=f"{blurb}（{archetype}）",
         inventory=["旅行裝備", "火把數支", "水袋", "少量銀幣"],

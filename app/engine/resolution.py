@@ -102,6 +102,24 @@ def _parametric_loyalty_decision(
     return None
 
 
+def _disposition_gate(ent: dict | None, approach: str | None) -> GateDecision | None:
+    """Turn durable NPC attitude into a pre-roll gate when the fiction is settled.
+
+    `frightened` still means "easier to pressure" and only grants advantage via the
+    condition catalog. `cowed` is stronger: the NPC is already broken/submissive, so
+    asking for another intimidation roll adds no meaningful uncertainty.
+    """
+    if not ent:
+        return None
+    if ent.get("disposition") == "cowed" and approach == "intimidation":
+        return GateDecision(
+            outcome=CheckOutcome.AUTO_SUCCESS,
+            triggering=("disposition:cowed",),
+            note="屈服：目標已被嚇到崩潰，再次威嚇無需檢定",
+        )
+    return None
+
+
 def gate_for_intent(state: "GameState", intent: Intent) -> GateDecision:
     """Look up the target's mechanical conditions and return a pre-roll gate
     decision (skip / auto-success / auto-fail / adv / disadv).
@@ -114,9 +132,8 @@ def gate_for_intent(state: "GameState", intent: Intent) -> GateDecision:
     if not intent.target:
         return GateDecision(CheckOutcome.ROLL)
     from ..db import store
-    _, conds = store.get_conditions_by_ref(state.current_location_id, intent.target)
-    if not conds:
-        return GateDecision(CheckOutcome.ROLL)
+    ent_id, conds = store.get_conditions_by_ref(state.current_location_id, intent.target)
+    ent = store.get_entity_by_id(ent_id) if ent_id else None
     skill = normalize_approach(intent.approach or intent.action)
     # Parametric loyalty / debt is decided against the actor id, so it lives outside
     # the catalog's per-skill table.
@@ -124,9 +141,15 @@ def gate_for_intent(state: "GameState", intent: Intent) -> GateDecision:
     if parametric is not None:
         return parametric
     meta = store.get_meta_by_ref(state.current_location_id, intent.target)
-    return conditions.evaluate_gate(
+    catalog_gate = conditions.evaluate_gate(
         conds, approach=skill, is_attack=intent.is_attack, condition_meta=meta,
     )
+    if catalog_gate.short_circuits:
+        return catalog_gate
+    disp_gate = _disposition_gate(ent, skill)
+    if disp_gate is not None:
+        return disp_gate
+    return catalog_gate
 
 
 def requires_check(state: "GameState", intent: Intent) -> bool:

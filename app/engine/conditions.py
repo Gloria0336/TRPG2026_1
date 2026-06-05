@@ -65,6 +65,8 @@ LYING = "lying"                              # insight DC -3 against this target
 LOYAL_TO = "loyal_to"                        # parametric — see loyal_to() helper
 INDEBTED_TO = "indebted_to"                  # parametric — see indebted_to() helper
 NPC_DISTRACTED = "npc_distracted"            # adv on stealth/sleight against them
+TRUSTED = "trusted"                          # fully trusts the party; diplomacy auto-succeeds
+COWED = "cowed"                              # broken/submissive; intimidation auto-succeeds
 
 # E class — semantic / inferred from other state, used by intent + resolution gates
 TARGET_UNCONSCIOUS = "target_unconscious"   # mirrors UNCONSCIOUS for the intent prompt
@@ -300,6 +302,20 @@ CATALOG: dict[str, ConditionEffect] = {
         label_zh="分心",
         description_zh="注意力被分散；對其潛行與巧手有優勢。",
         advantage_against={"stealth": "advantage", "thievery": "advantage"},
+    ),
+    TRUSTED: ConditionEffect(
+        label_zh="信任",
+        description_zh="完全信任隊伍；合理請託與交涉無需檢定。",
+        outcomes={
+            "diplomacy": CheckOutcome.AUTO_SUCCESS,
+        },
+    ),
+    COWED: ConditionEffect(
+        label_zh="屈服",
+        description_zh="已被嚇到崩潰；再次威嚇無需檢定。",
+        outcomes={
+            "intimidation": CheckOutcome.AUTO_SUCCESS,
+        },
     ),
 }
 

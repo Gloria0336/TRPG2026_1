@@ -1172,7 +1172,14 @@ def _match_action(pc, intent, text: str):
         if action.name.lower() in low or i18n.action(action.name).lower() in low:
             return action
     if "heal" in low or "cure" in low or "治療" in text or "恢復" in text:
-        return pc.find_action("Cure Wounds") or pc.find_action("Healing Word") or pc.find_action("Second Wind")
+        return (
+            pc.find_action("Heal")
+            or pc.find_action("Healing Font")
+            or pc.find_action("Catch Breath")
+            or pc.find_action("Cure Wounds")
+            or pc.find_action("Healing Word")
+            or pc.find_action("Second Wind")
+        )
     if intent.is_attack:
         from ..engine.types import ActionType
 
