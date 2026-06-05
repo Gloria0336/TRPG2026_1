@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import conditions, dice, rules_5e
+from . import conditions, dice, guild_rank, rules_5e
 from .conditions import CheckOutcome, GateDecision
 from .types import (
     Boon,
@@ -26,6 +26,8 @@ from .types import (
     ResultBand,
     ResultKind,
     SKILLS,
+    TRAINED_RANKS,
+    normalize_proficiency_rank,
 )
 from ..logging_setup import get_logger
 
@@ -396,6 +398,24 @@ def npc_dc_adjustment(state: "GameState", intent: Intent) -> tuple[int, str | No
     return rules_5e.npc_modifier(disp), disp
 
 
+def rank_dc_adjustment(state: "GameState", intent: Intent) -> tuple[int, str | None]:
+    """Soft rank gate: target/location flags can add pressure without blocking play."""
+    actor = state.characters.get(intent.actor_id)
+    if actor is None or not intent.target:
+        return 0, None
+    from ..db import store
+    ent = store.find_by_ref(state.current_location_id, intent.target)
+    if not ent:
+        return 0, None
+    flags = ent.get("flags") or {}
+    min_rank = flags.get("min_rank")
+    gate = str(flags.get("gate") or "soft").lower()
+    if not min_rank or gate == "hard":
+        return 0, str(min_rank) if min_rank else None
+    penalty = guild_rank.under_rank_dc_penalty(str(min_rank), actor)
+    return penalty, str(min_rank) if penalty else None
+
+
 def determine_dc(state: "GameState", intent: Intent, assessment: "DCAssessment | None") -> int:
     """DC ownership: the AI's base-band + env-modifier assessment owns the DC (final DC,
     NOT anchor-snapped). The scene challenge table is only a *fallback* for when the AI
@@ -420,9 +440,10 @@ def determine_dc(state: "GameState", intent: Intent, assessment: "DCAssessment |
             base_dc = rules_5e.BAND_DC["normal"]
             source = "default normal"
     npc_mod, disp = npc_dc_adjustment(state, intent)
-    final = max(rules_5e.MIN_DC, base_dc + npc_mod)
-    log.debug("determine_dc: %s base=%d npc=%+d (%s) → DC %d",
-              source, base_dc, npc_mod, disp or "—", final)
+    rank_mod, min_rank = rank_dc_adjustment(state, intent)
+    final = max(rules_5e.MIN_DC, base_dc + npc_mod + rank_mod)
+    log.debug("determine_dc: %s base=%d npc=%+d (%s) rank=%+d (%s) → DC %d",
+              source, base_dc, npc_mod, disp or "—", rank_mod, min_rank or "—", final)
     return final
 
 
@@ -449,7 +470,10 @@ def _compose_external(
         ]
         assist_pts = rules_5e.assist_bonus(helper_chars, skill)
         if assist_pts:
-            names = "、".join(h.name for h in helper_chars if h.skill_prof.get(skill) in ("prof", "expertise"))
+            names = "、".join(
+                h.name for h in helper_chars
+                if normalize_proficiency_rank(h.skill_prof.get(skill)) in TRAINED_RANKS
+            )
             parts.append(f"協助 +{assist_pts}（{names}）")
         elif helper_chars:
             # Surface that someone tried to help but didn't qualify — useful for UX
@@ -706,6 +730,9 @@ def resolve(
 
     if external_parts:
         result.deltas.append("外部加值：" + "、".join(external_parts))
+    rank_mod, min_rank = rank_dc_adjustment(state, intent)
+    if rank_mod:
+        result.deltas.append(f"階級壓力：需要 {min_rank} 級，DC +{rank_mod}")
 
     # Actor-side degree drop (e.g. under_duress on the actor itself — rare for PCs, but
     # the mechanism is symmetric). Drops one degree of success (PF2e): CRIT_SUCCESS→SUCCESS,

@@ -767,7 +767,7 @@ async def _begin_check(channel, user, gs, pc, intent, assessment) -> None:
     for other_pc in gs.pcs():
         if other_pc.id == pc.id:
             continue
-        if other_pc.skill_prof.get(skill) not in ("prof", "expertise"):
+        if not other_pc.is_trained(skill):
             continue
         claim = gs.claim_for_pc(other_pc.id)
         if not claim:

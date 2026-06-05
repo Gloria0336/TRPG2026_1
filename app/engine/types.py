@@ -22,6 +22,29 @@ class Ability(str, Enum):
     CHA = "CHA"
 
 
+class ProficiencyRank(str, Enum):
+    UNTRAINED = "untrained"
+    TRAINED = "trained"
+    EXPERT = "expert"
+    MASTER = "master"
+    LEGENDARY = "legendary"
+
+
+PROFICIENCY_ORDER: tuple[str, ...] = tuple(rank.value for rank in ProficiencyRank)
+TRAINED_RANKS: frozenset[str] = frozenset({
+    ProficiencyRank.TRAINED.value,
+    ProficiencyRank.EXPERT.value,
+    ProficiencyRank.MASTER.value,
+    ProficiencyRank.LEGENDARY.value,
+})
+
+_LEGACY_PROFICIENCY: dict[str, str] = {
+    "prof": ProficiencyRank.TRAINED.value,
+    "proficient": ProficiencyRank.TRAINED.value,
+    "expertise": ProficiencyRank.MASTER.value,
+}
+
+
 # PF2e skill → governing (key) ability (design §4.2). Perception is kept here too so the
 # engine can compute its bonus uniformly, though in PF2e it is a separate proficiency.
 # Note vs 5e: Nature/Religion are WIS-keyed; Diplomacy replaces Persuasion, Thievery
@@ -56,6 +79,30 @@ def ability_modifier(score: int) -> int:
 # Proficiency bonus by character level (5e table, levels 1-20).
 def proficiency_bonus(level: int) -> int:
     return 2 + (max(1, min(level, 20)) - 1) // 4
+
+
+def normalize_proficiency_rank(value: str | ProficiencyRank | None) -> str:
+    """Normalize legacy and current skill ranks to the bounded five-step model."""
+    if isinstance(value, ProficiencyRank):
+        return value.value
+    raw = str(value or "").strip().lower()
+    raw = _LEGACY_PROFICIENCY.get(raw, raw)
+    if raw in PROFICIENCY_ORDER:
+        return raw
+    return ProficiencyRank.UNTRAINED.value
+
+
+def proficiency_rank_bonus(rank: str | ProficiencyRank | None, level: int) -> int:
+    """Bounded PF2e-shaped rank bonus layered on the existing 5e prof bonus."""
+    normalized = normalize_proficiency_rank(rank)
+    pb = proficiency_bonus(level)
+    return {
+        ProficiencyRank.UNTRAINED.value: 0,
+        ProficiencyRank.TRAINED.value: pb,
+        ProficiencyRank.EXPERT.value: pb + 2,
+        ProficiencyRank.MASTER.value: pb + 4,
+        ProficiencyRank.LEGENDARY.value: pb + 6,
+    }[normalized]
 
 
 # ───────────────────────── Damage / actions ─────────────────────────
@@ -143,8 +190,14 @@ class Character:
     movement_base: float = 4.0
     is_vehicle: bool = False
     vehicle_type: str | None = None
-    # skill name -> "prof" | "expertise"  (absent = not proficient)
+    # skill name -> ProficiencyRank value (legacy "prof"/"expertise" accepted on load)
     skill_prof: dict[str, str] = field(default_factory=dict)
+    skill_points: int = 0
+    lore_prof: dict[str, str] = field(default_factory=dict)
+    guild_rank: str = "F"
+    merit: int = 0
+    standing: int = 0
+    rank_flags: dict[str, object] = field(default_factory=dict)
     save_prof: list[str] = field(default_factory=list)  # proficient saving-throw abilities
     actions: list[Action] = field(default_factory=list)
     conditions: list[str] = field(default_factory=list)
@@ -180,12 +233,14 @@ class Character:
     def skill_bonus(self, skill: str) -> int:
         ability = SKILLS[skill]
         bonus = self.mod(ability)
-        prof = self.skill_prof.get(skill)
-        if prof == "prof":
-            bonus += self.prof_bonus
-        elif prof == "expertise":
-            bonus += self.prof_bonus * 2
+        bonus += proficiency_rank_bonus(self.skill_prof.get(skill), self.level)
         return bonus
+
+    def lore_bonus(self, lore: str) -> int:
+        return self.mod(Ability.INT) + proficiency_rank_bonus(self.lore_prof.get(lore), self.level)
+
+    def is_trained(self, skill: str) -> bool:
+        return normalize_proficiency_rank(self.skill_prof.get(skill)) in TRAINED_RANKS
 
     def save_bonus(self, ability: Ability | str) -> int:
         key = ability.value if isinstance(ability, Ability) else ability
@@ -213,6 +268,21 @@ class Character:
     @classmethod
     def from_dict(cls, d: dict) -> "Character":
         d = dict(d)
+        d["skill_prof"] = {
+            str(k): normalize_proficiency_rank(v)
+            for k, v in dict(d.get("skill_prof", {})).items()
+            if normalize_proficiency_rank(v) != ProficiencyRank.UNTRAINED.value
+        }
+        d["lore_prof"] = {
+            str(k): normalize_proficiency_rank(v)
+            for k, v in dict(d.get("lore_prof", {})).items()
+            if normalize_proficiency_rank(v) != ProficiencyRank.UNTRAINED.value
+        }
+        d.setdefault("skill_points", 0)
+        d.setdefault("guild_rank", "F")
+        d.setdefault("merit", 0)
+        d.setdefault("standing", 0)
+        d.setdefault("rank_flags", {})
         d["actions"] = [Action.from_dict(a) for a in d.get("actions", [])]
         return cls(**d)
 

@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import re
 
+from . import currency
+
 
 SEED_ITEMS: list[dict] = [
+    *currency.coin_item_defs(),
     {
         "id": "item_longsword",
         "name": "長劍",
@@ -127,16 +130,6 @@ SEED_ITEMS: list[dict] = [
         "stackable": False,
         "source": "seed",
     },
-    {
-        "id": "item_silver_coins",
-        "name": "少許銀幣",
-        "aliases": ["銀幣", "silver coins"],
-        "category": "treasure",
-        "slot": None,
-        "description": "數量不多、足以應急的銀幣。",
-        "stackable": True,
-        "source": "seed",
-    },
 ]
 
 
@@ -159,6 +152,13 @@ def parse_freetext(line: str) -> dict | None:
     """Best-effort mapping from legacy Character.inventory strings to item defs."""
     raw = (line or "").strip()
     if not raw:
+        return None
+    grant = currency.parse_currency_grant(raw)
+    if grant:
+        for item in currency.coin_item_defs():
+            if item["id"] == grant.item_id:
+                return {**item, "quantity": grant.quantity}
+    if currency.looks_like_currency(raw):
         return None
     norm = normalize_name(raw)
     for item in SEED_ITEMS:

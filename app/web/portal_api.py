@@ -78,6 +78,13 @@ def _public_character(c: Character, gs: game_state.GameState | None) -> dict:
         "conditions": c.conditions,
         "blurb": c.blurb,
         "abilities": c.abilities,
+        "skill_prof": c.skill_prof,
+        "skill_points": c.skill_points,
+        "lore_prof": c.lore_prof,
+        "guild_rank": c.guild_rank,
+        "merit": c.merit,
+        "standing": c.standing,
+        "rank_flags": c.rank_flags,
         "actions": [a.name for a in c.actions],
         "claim": claim,
     }

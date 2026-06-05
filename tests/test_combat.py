@@ -28,6 +28,16 @@ def test_start_combat_builds_order():
     assert inits == sorted(inits, reverse=True)
 
 
+def test_find_character_accepts_i18n_display_names():
+    gs = _fresh()
+    from app.content import scenario
+    gs.goto_scene(scenario.scene_by_id("warren"))
+    gs.start_scene_combat()
+
+    assert gs.find_character("哥布林首領葛利克斯").id == "goblin_boss"
+    assert gs.find_character("哥布林 1").id == "goblin_1"
+
+
 def test_turn_advance_increments_round():
     gs = _fresh()
     from app.content import scenario

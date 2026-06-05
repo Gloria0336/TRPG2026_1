@@ -16,6 +16,8 @@ from .types import (
     ResultBand,
     ResultKind,
     SKILLS,
+    TRAINED_RANKS,
+    normalize_proficiency_rank,
 )
 
 # Difficulty ladder (design §4.3 — four-tier, standard = DC 10). The ladder supplies the
@@ -98,7 +100,10 @@ def assist_bonus(helpers: list[Character], skill: str) -> int:
         # Raw ability or unknown approach: proficiency check doesn't apply, so we
         # can't tell who's qualified. Be strict — return 0 rather than over-granting.
         return 0
-    qualifying = [h for h in helpers if h.skill_prof.get(skill) in ("prof", "expertise")]
+    qualifying = [
+        h for h in helpers
+        if normalize_proficiency_rank(h.skill_prof.get(skill)) in TRAINED_RANKS
+    ]
     bonus = 0
     for i, _ in enumerate(qualifying):
         bonus += ASSIST_BONUSES[i] if i < len(ASSIST_BONUSES) else 0

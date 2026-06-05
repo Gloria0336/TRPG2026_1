@@ -39,6 +39,13 @@ DEFAULT_QUEST_TAGS: dict[str, str] = {
     "content_type": "mixed",
 }
 
+EXTRA_SYSTEM_TAGS = {
+    "min_rank",
+    "promotion_trial",
+    "reward_sp",
+    "reward_merit",
+}
+
 
 def normalize_tags(tags: dict | None) -> dict[str, str]:
     """Coerce arbitrary tag data into the fixed eight-axis taxonomy."""
@@ -49,4 +56,10 @@ def normalize_tags(tags: dict | None) -> dict[str, str]:
         value = tags.get(axis)
         if isinstance(value, str) and value in allowed:
             out[axis] = value
+    for key in EXTRA_SYSTEM_TAGS:
+        value = tags.get(key)
+        if isinstance(value, bool):
+            out[key] = value
+        elif isinstance(value, (str, int)):
+            out[key] = str(value) if isinstance(value, int) else value
     return out

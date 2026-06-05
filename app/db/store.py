@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from ..config import settings
+from ..content import currency as currency_catalog
 from ..content import items as item_catalog
 from ..content import quest_taxonomy
 from ..logging_setup import get_logger
@@ -330,7 +331,28 @@ def grant_item(
     """Grant an item to an actor, lazily creating the catalog row only on acquisition."""
     if not actor_id or not actor_id.strip():
         raise ValueError("actor_id is required")
-    qty = max(1, int(quantity or 1))
+    currency_grant = currency_catalog.parse_currency_grant(item_ref, quantity)
+    if currency_grant:
+        coin_def = next(d for d in currency_catalog.coin_item_defs() if d["id"] == currency_grant.item_id)
+        item_id = register_item(
+            coin_def["name"],
+            item_id=coin_def["id"],
+            category=coin_def["category"],
+            slot=coin_def["slot"],
+            aliases=coin_def.get("aliases", []),
+            description=coin_def.get("description", ""),
+            metadata=coin_def.get("metadata", {}),
+            source=coin_def.get("source", "seed"),
+            stackable=True,
+        )
+        item_ref = item_id
+        qty = currency_grant.quantity
+        category = "treasure"
+        stackable = True
+    elif currency_catalog.looks_like_currency(item_ref):
+        raise ValueError(f"invalid currency grant: {item_ref!r}")
+    else:
+        qty = max(1, int(quantity or 1))
     item = find_item_by_ref(item_ref)
     if item is None:
         item_id = register_item(

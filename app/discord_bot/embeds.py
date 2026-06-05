@@ -33,13 +33,14 @@ def roster_embed(state: GameState) -> discord.Embed:
     for pc in state.pcs():
         taken = pc.id in state.players.values()
         who = "（已被選走）" if taken else ""
-        skills = ", ".join(i18n.skill(s) for s in pc.skill_prof) or "無"
+        skills = ", ".join(f"{i18n.skill(s)}({rank})" for s, rank in pc.skill_prof.items()) or "無"
         actions = ", ".join(i18n.action(a.name) for a in pc.actions[:3])
         e.add_field(
             name=f"{i18n.character_label(pc)}（等級 {pc.level}）{who}",
             value=(
                 f"{pc.blurb}\n"
                 f"生命值 {pc.max_hp} ・ 護甲 {pc.ac}\n"
+                f"公會階級 {pc.guild_rank} ・ SP {pc.skill_points} ・ merit {pc.merit}\n"
                 f"熟練技能：{skills}\n"
                 f"主要動作：{actions}"
             ),
@@ -83,9 +84,17 @@ def character_embed(c: Character) -> discord.Embed:
     e.add_field(name="生命值", value=f"{c.hp}/{c.max_hp}", inline=True)
     e.add_field(name="護甲", value=str(c.ac), inline=True)
     e.add_field(name="等級", value=str(c.level), inline=True)
+    e.add_field(name="公會", value=f"{c.guild_rank} 級｜merit {c.merit}｜聲望 {c.standing}", inline=False)
+    e.add_field(name="技能點", value=str(c.skill_points), inline=True)
     if c.skill_prof:
-        skills = ", ".join(f"{i18n.skill(s)} ({c.skill_bonus(s):+d})" for s in c.skill_prof)
+        skills = ", ".join(
+            f"{i18n.skill(s)} {rank} ({c.skill_bonus(s):+d})"
+            for s, rank in c.skill_prof.items()
+        )
         e.add_field(name="熟練技能", value=skills, inline=False)
+    if c.lore_prof:
+        lore = ", ".join(f"{name} {rank} ({c.lore_bonus(name):+d})" for name, rank in c.lore_prof.items())
+        e.add_field(name="Lore", value=lore, inline=False)
     if c.actions:
         acts = "\n".join(_action_line(a) for a in c.actions)
         e.add_field(name="動作", value=acts, inline=False)

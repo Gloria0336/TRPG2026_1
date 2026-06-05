@@ -15,6 +15,7 @@ from ..content import monsters, scenario
 from ..content.characters import premade_pcs
 from ..db import store
 from . import campaigns
+from ..engine import guild_rank, progression
 from ..engine.combat import start_combat
 from ..engine.types import Character, CombatState, Event, ResolutionResult
 from ..logging_setup import get_logger
@@ -83,6 +84,7 @@ def _migrate_character_inventory(c: Character) -> None:
                     store.grant_item(
                         c.id,
                         item["name"],
+                        quantity=int(item.get("quantity") or 1),
                         category=item.get("category"),
                         slot=item.get("slot"),
                         aliases=item.get("aliases", []),
@@ -124,6 +126,15 @@ _PROVOKE_SUBMISSIVE_DISPOSITIONS = {"afraid", "cowed"}
 _PROVOKE_BASELINE_FLAG = "provoke_baseline"   # attitude before the first provocation
 _PROVOKED_AT_FLAG = "provoked_at"             # world_minutes of the latest provocation
 _PROVOKE_RECOVER_MINUTES = 24 * 60            # a calm in-game day restores the baseline
+
+_QUEST_REWARD_BY_RISK: dict[str, tuple[int, int]] = {
+    "trivial": (1, 2),
+    "low": (1, 5),
+    "moderate": (2, 10),
+    "high": (3, 25),
+    "deadly": (4, 60),
+    "unknown": (1, 5),
+}
 
 
 # ───────────────────────── Scene ─────────────────────────
@@ -210,12 +221,15 @@ class GameState:
         if ref in self.characters:
             return self.characters[ref]
         rl = ref.strip().lower()
-        # exact name, then first-name / contains match
+        from ..discord_bot import i18n
+
+        # Exact internal/display name, then first-name / contains match.
         for c in self.characters.values():
-            if c.name.lower() == rl:
+            if c.name.lower() == rl or i18n.name(c.name).lower() == rl:
                 return c
         for c in self.characters.values():
-            if rl in c.name.lower() or c.name.lower().split()[0] == rl:
+            names = (c.name.lower(), i18n.name(c.name).lower())
+            if any(rl in n or n.split()[0] == rl for n in names if n):
                 return c
         return None
 
@@ -709,6 +723,59 @@ class GameState:
             )
         )
 
+    def complete_quest(self, quest_id: str, *, actor_id: str | None = None) -> dict | None:
+        """Mark a quest completed and grant default SP/merit rewards to PCs.
+
+        Reward amounts are intentionally small, bounded defaults keyed by risk_level;
+        authored quest tags may override them with integer `reward_sp` / `reward_merit`.
+        """
+        quest = store.update_quest_status(quest_id, "completed")
+        if quest is None:
+            return None
+        tags = quest.get("tags") or {}
+        risk = str(tags.get("risk_level") or "unknown")
+        default_sp, default_merit = _QUEST_REWARD_BY_RISK.get(risk, _QUEST_REWARD_BY_RISK["unknown"])
+        try:
+            sp = max(0, int(tags.get("reward_sp", default_sp)))
+        except (TypeError, ValueError):
+            sp = default_sp
+        try:
+            merit = max(0, int(tags.get("reward_merit", default_merit)))
+        except (TypeError, ValueError):
+            merit = default_merit
+
+        awarded: list[str] = []
+        for pc in self.pcs():
+            progression.grant_skill_points(pc, sp)
+            guild_rank.award_merit(pc, merit)
+            awarded.append(f"{pc.name} +{sp} SP / +{merit} merit")
+        title = (quest.get("details") or {}).get("title") or (quest.get("seed") or {}).get("title_hint") or quest_id
+        self.add_event(Event(
+            actor_id=actor_id or "system",
+            actor_name=self.characters.get(actor_id).name if actor_id and actor_id in self.characters else "GM",
+            kind="quest",
+            summary=f"任務完成：{title}（" + "；".join(awarded) + "）",
+            data={"quest_id": quest_id, "reward_sp": sp, "reward_merit": merit},
+        ))
+        self.bump()
+        return quest
+
+    def fail_quest(self, quest_id: str, *, actor_id: str | None = None) -> dict | None:
+        quest = store.update_quest_status(quest_id, "failed")
+        if quest is None:
+            return None
+        for pc in self.pcs():
+            pc.standing -= 1
+        self.add_event(Event(
+            actor_id=actor_id or "system",
+            actor_name=self.characters.get(actor_id).name if actor_id and actor_id in self.characters else "GM",
+            kind="quest",
+            summary=f"任務失敗：{quest_id}（公會聲望 -1）",
+            data={"quest_id": quest_id},
+        ))
+        self.bump()
+        return quest
+
     def set_narration(self, event_id: str, narration: str) -> None:
         """Attach AI prose to a previously-logged event (narration is async, §5.4)."""
         for ev in reversed(self.event_log):
@@ -765,6 +832,13 @@ class GameState:
                     "level": c.level, "hp": c.hp, "max_hp": c.max_hp, "ac": c.ac,
                     "conditions": c.conditions, "blurb": c.blurb,
                     "abilities": c.abilities,
+                    "skill_prof": c.skill_prof,
+                    "skill_points": c.skill_points,
+                    "lore_prof": c.lore_prof,
+                    "guild_rank": c.guild_rank,
+                    "merit": c.merit,
+                    "standing": c.standing,
+                    "rank_flags": c.rank_flags,
                     "actions": [a.name for a in c.actions],
                     "claim": self.claim_for_pc(c.id) if c.is_pc else None,
                 }
