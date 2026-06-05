@@ -66,6 +66,13 @@ ABSTRACT_ALIASES: dict[str, str] = {
     "滿箱": "箱",
 }
 
+ALIAS_UNITS: dict[str, str] = {
+    "小撮": "把",
+    "撮": "把",
+    "小包": "小袋",
+    "大包": "大袋",
+}
+
 _DIGITS_ZH = {
     "一": 1,
     "二": 2,
@@ -219,13 +226,15 @@ def _abstract_quantity(prefix: str) -> int | None:
 
 
 def _split_multiplier_unit(prefix: str) -> tuple[int, str]:
-    match = re.fullmatch(r"(?P<num>\d+)(?P<unit>枚|把|小袋|袋|大袋|箱)", prefix)
+    match = re.fullmatch(r"(?P<num>\d+)(?P<unit>枚|把|小袋|袋|大袋|箱|小撮|撮|小包|大包)", prefix)
     if match:
-        return int(match.group("num")), match.group("unit")
+        unit = match.group("unit")
+        return int(match.group("num")), ALIAS_UNITS.get(unit, unit)
 
     for zh, value in sorted(_DIGITS_ZH.items(), key=lambda kv: len(kv[0]), reverse=True):
         if prefix.startswith(zh):
-            return value, prefix[len(zh):]
+            unit = prefix[len(zh):]
+            return value, ALIAS_UNITS.get(unit, unit)
     return 1, prefix
 
 

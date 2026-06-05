@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from ..ai import orchestrator, prompts
 from ..config import settings
-from ..content import director, monsters, scenario
+from ..content import currency, director, monsters, scenario
 from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
@@ -349,6 +349,14 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                 log.info("entity delta applied: scope=%s entity=%s %s",
                          scope, ent_id, delta.model_dump(exclude_none=True))
         for grant in extraction.acquired_items():
+            if currency.looks_like_currency(grant.item_name) and not currency.parse_currency_grant(
+                grant.item_name, grant.quantity
+            ):
+                log.info(
+                    "currency grant skipped (unquantified or missing denomination): %s",
+                    grant.model_dump(exclude_none=True),
+                )
+                continue
             recipient_id = _grant_recipient_id(
                 gs,
                 grant.recipient_ref,
@@ -357,13 +365,17 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
             if not recipient_id:
                 log.info("item grant skipped (no recipient): %s", grant.model_dump(exclude_none=True))
                 continue
-            saved = store.grant_item(
-                recipient_id,
-                grant.item_name,
-                quantity=grant.quantity,
-                category=grant.category,
-                event_id=getattr(result, "event_id", None),
-            )
+            try:
+                saved = store.grant_item(
+                    recipient_id,
+                    grant.item_name,
+                    quantity=grant.quantity,
+                    category=grant.category,
+                    event_id=getattr(result, "event_id", None),
+                )
+            except ValueError as exc:
+                log.info("item grant skipped (%s): %s", exc, grant.model_dump(exclude_none=True))
+                continue
             actor = gs.characters.get(recipient_id)
             if actor:
                 actor.inventory = store.project_inventory(recipient_id)

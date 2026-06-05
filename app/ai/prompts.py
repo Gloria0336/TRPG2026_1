@@ -22,6 +22,14 @@ if TYPE_CHECKING:
     from ..state.game_state import GameState
 
 
+CURRENCY_RULES = """CURRENCY RULES (hard engine truth):
+- Coin denominations are only 金幣, 銀幣, 銅幣. Rates: 1 金幣 = 10 銀幣 = 1000 銅幣.
+- Allowed coin quantities: 一枚=1, 少許=10, 一把=10, 一小袋=50, 一袋=100, 一大袋=500, 一箱=2000.
+- Abstract coin words are mechanical aliases only when a clear denomination is present: 一點/一點點/些許/少量/幾枚/幾個=10, 一小撮/一撮=10, 一小包=50, 一些/一批/一堆/很多/大量/滿袋/滿滿一袋=100, 一大包=500, 整箱/滿箱=2000.
+- Multipliers are allowed: 兩把金幣=20, 三小袋銀幣=150, 2箱銅幣=4000.
+- Never use or extract un-denominated money such as 很多錢, 一袋錢幣, 一大筆錢; rewrite with a denomination or leave it ungranted."""
+
+
 # Chinese labels for entity state markers shown to the narrator.
 _DISPOSITION_ZH = {
     "friendly": "友善", "neutral": "中立", "wary": "戒備",
@@ -439,7 +447,7 @@ def intent_context(
 
 
 # ───────────────────────── Narrator (GM voice) ─────────────────────────
-NARRATE_SYSTEM = """You are the GAME MASTER narrator for a Pathfinder 2e session. \
+NARRATE_SYSTEM = f"""You are the GAME MASTER narrator for a Pathfinder 2e session. \
 You will be given a STRUCTURED RESULT that the game engine has already computed (dice, \
 hits, damage, band, cost, boon). Your job is to dramatize it in vivid, concise prose.
 
@@ -462,7 +470,9 @@ given (heavier) `cost`.
 or add a different one.
 - Keep it to 1-3 sentences. Be evocative but tight. Address the table naturally.
 - Do not mention dice, DCs, or modifiers explicitly unless it adds flavor; describe the \
-fiction, not the math."""
+fiction, not the math.
+
+{CURRENCY_RULES}"""
 
 
 def _event_line(e, *, full: bool = True) -> str:
@@ -639,6 +649,8 @@ player merely thinking about a goal.
 negotiation, or proof is established.
 - Tags must use the fixed eight-axis taxonomy names and values already implied by the JSON shape.
 
+{CURRENCY_RULES}
+
 Respond with this exact shape:
 {QUEST_SEED_JSON_SHAPE}"""
 
@@ -654,6 +666,8 @@ Rules:
 - The result should be useful once the player accepts the task: objective, known facts, \
 details, next steps, success conditions, risks, reward, and fixed taxonomy tags.
 - Tags must use the fixed eight-axis taxonomy only.
+
+{CURRENCY_RULES}
 
 Respond with ONLY JSON:
 {QUEST_DETAILS_JSON_SHAPE}"""
@@ -803,6 +817,12 @@ in-scene source. Mere mention, scenery, looking at an item, wanting an item, or 
 negotiation MUST leave `item_grants` empty. Do not register loot just because it exists \
 in the room. Use `recipient_ref` only when the narration names a recipient; otherwise \
 leave it null so the engine can use the acting PC.
+- Currency item grants MUST use exact coin quantities. If narration says "兩把金幣", \
+emit item_name="金幣", quantity=20. If it says "很多銀幣", emit item_name="銀幣", \
+quantity=100. If money has no clear denomination (e.g. "一袋錢幣", "很多錢"), emit no \
+item_grants for it.
+
+{CURRENCY_RULES}
 
 Respond with ONLY a JSON object of this exact shape (no prose, no markdown fences):
 {EXTRACT_JSON_SHAPE}"""
