@@ -17,10 +17,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
-from ..content import scenario
 from ..engine.types import Action, ActionType, Character, Damage, Event
-from ..state import game_state
-from ..world import location_registration
+from ..state import game_state, player_registry
 
 
 router = APIRouter(prefix="/api/portal")
@@ -91,13 +89,21 @@ def _public_character(c: Character, gs: game_state.GameState | None) -> dict:
 
 
 def _player_status(gs: game_state.GameState | None, user_id: str | None) -> dict:
+    registered = player_registry.get_character(user_id) if user_id else None
+    registered_payload = _public_character(registered, None) if registered else None
     if not gs or not user_id:
-        return {"claimed_pc_id": None, "character": None, "turn": None}
+        return {
+            "claimed_pc_id": None,
+            "character": registered_payload,
+            "registered_character": registered_payload,
+            "turn": None,
+        }
     pc = gs.pc_for_user(user_id)
     turn_id = gs.pending_freeplay_actor_id() or gs.current_freeplay_actor_id()
     return {
         "claimed_pc_id": pc.id if pc else None,
-        "character": _public_character(pc, gs) if pc else None,
+        "character": _public_character(pc, gs) if pc else registered_payload,
+        "registered_character": registered_payload,
         "turn": {
             "current_pc_id": turn_id,
             "is_yours": bool(pc and turn_id == pc.id),
@@ -113,6 +119,10 @@ def _portal_state(request: Request) -> dict:
     gs = game_state.get_state()
     user = _session_user(request)
     user_id = str(user["id"]) if user and user.get("id") else None
+    characters = [_public_character(c, gs) for c in gs.pcs()] if gs else []
+    registered = player_registry.get_character(user_id) if user_id else None
+    if registered and registered.id not in {c["id"] for c in characters}:
+        characters.append(_public_character(registered, gs))
     return {
         "viewer": user,
         "campaign": {
@@ -121,7 +131,7 @@ def _portal_state(request: Request) -> dict:
             "scene": gs.scene.to_dict() if gs else None,
         },
         "player_status": _player_status(gs, user_id),
-        "characters": [_public_character(c, gs) for c in gs.pcs()] if gs else [],
+        "characters": characters,
         "quests": _quest_payload(gs),
     }
 
@@ -290,19 +300,16 @@ async def claim_character(pc_id: str, request: Request) -> JSONResponse:
 async def create_character(payload: CharacterCreateRequest, request: Request) -> JSONResponse:
     user = _require_user(request)
     gs = game_state.get_state()
-    if not gs:
-        gs = game_state.reset_state(channel_id=0)
-        await location_registration.ensure_seed_location_cards(gs, scenario.LOCATIONS)
     pc = _character_from_request(payload, str(user["id"]))
-    gs.characters[pc.id] = pc
-    gs.pc_ids.append(pc.id)
-    display_name = user.get("global_name") or user.get("username") or user["id"]
-    gs.claim_pc(str(user["id"]), pc.id, str(display_name))
-    gs.add_event(Event(
-        actor_id=pc.id,
-        actor_name=pc.name,
-        kind="character",
-        summary=f"{pc.name} 加入了冒險入口。",
-    ))
-    gs.save()
+    player_registry.set_character(str(user["id"]), pc)
+    if gs and gs.pc_for_user(str(user["id"])):
+        display_name = user.get("global_name") or user.get("username") or user["id"]
+        campaign_pc = gs.add_player_character(str(user["id"]), pc, str(display_name))
+        gs.add_event(Event(
+            actor_id=campaign_pc.id,
+            actor_name=campaign_pc.name,
+            kind="character",
+            summary=f"{campaign_pc.name} 更新了綁定角色卡。",
+        ))
+        gs.save()
     return JSONResponse(_portal_state(request), status_code=201)

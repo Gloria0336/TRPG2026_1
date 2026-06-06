@@ -197,7 +197,8 @@ class GameState:
         self.channel_id: int | None = channel_id
         self.characters: dict[str, Character] = {}
         self.pc_ids: list[str] = []
-        # Discord user id (str) -> pc id. A player "claims" one of the pre-made PCs.
+        # Discord user id (str) -> pc id. In the Discord flow this is the active party:
+        # registered players bring their own card, visitors receive a guest premade clone.
         self.players: dict[str, str] = {}
         # Discord user id (str) -> display name/nickname shown on the dashboard.
         self.player_names: dict[str, str] = {}
@@ -236,6 +237,30 @@ class GameState:
     def pcs(self) -> list[Character]:
         return [self.characters[i] for i in self.pc_ids if i in self.characters]
 
+    def joined_pc_ids(self) -> list[str]:
+        """PC ids that have actually joined this campaign via a Discord player."""
+        seen: set[str] = set()
+        ids: list[str] = []
+        for pc_id in self.players.values():
+            if pc_id in seen or pc_id not in self.characters:
+                continue
+            seen.add(pc_id)
+            ids.append(pc_id)
+        return ids
+
+    def joined_pcs(self) -> list[Character]:
+        return [self.characters[i] for i in self.joined_pc_ids()]
+
+    def active_party_ids(self) -> list[str]:
+        """Participants for live play.
+
+        Tests and offline scripts still use a fresh new_game() without Discord joins, so
+        we fall back to all authored PC ids when no one has joined yet. Once a Discord
+        player joins, only joined PCs are considered the party.
+        """
+        joined = self.joined_pc_ids()
+        return joined if joined else [pid for pid in self.pc_ids if pid in self.characters]
+
     # ── player ↔ PC claims ──
     def claim_pc(self, user_id: str, pc_id: str, display_name: str | None = None) -> bool:
         """Assign a PC to a Discord user. Returns False if the PC is already taken."""
@@ -252,6 +277,30 @@ class GameState:
             self.flags["freeplay_turn_order"] = order
         self.bump()
         return True
+
+    def add_player_character(self, user_id: str, pc: Character, display_name: str | None = None) -> Character:
+        """Add or update a Discord user's own character card in this campaign."""
+        existing_id = self.players.get(user_id)
+        pc = Character.from_dict(pc.to_dict())
+        pc.is_pc = True
+        if existing_id and existing_id in self.characters:
+            pc.id = existing_id
+            self.characters[existing_id] = pc
+            _refresh_inventory_projections({pc.id: pc})
+            if display_name:
+                self.player_names[user_id] = display_name
+            self.bump()
+            return pc
+
+        claim = self.claim_for_pc(pc.id)
+        if pc.id in self.characters and claim is not None and claim.get("user_id") != user_id:
+            pc.id = f"{pc.id}_{user_id}"
+        if pc.id not in self.pc_ids:
+            self.pc_ids.append(pc.id)
+        self.characters[pc.id] = pc
+        _refresh_inventory_projections({pc.id: pc})
+        self.claim_pc(user_id, pc.id, display_name)
+        return pc
 
     def claim_for_pc(self, pc_id: str) -> dict | None:
         for user_id, claimed_pc_id in self.players.items():
@@ -274,7 +323,7 @@ class GameState:
     def freeplay_turn_order(self) -> list[str]:
         claimed = set(self.players.values())
         saved = [pid for pid in self.flags.get("freeplay_turn_order", []) if pid in claimed]
-        missing = [pid for pid in self.pc_ids if pid in claimed and pid not in saved]
+        missing = [pid for pid in self.joined_pc_ids() if pid in claimed and pid not in saved]
         order = saved + missing
         if order != self.flags.get("freeplay_turn_order"):
             self.flags["freeplay_turn_order"] = order
@@ -525,7 +574,7 @@ class GameState:
                 mon = monsters.spawn(key, i)
                 self.characters[mon.id] = mon
                 spawned.append(mon.id)
-        participant_ids = self.pc_ids + spawned
+        participant_ids = self.active_party_ids() + spawned
         combat = start_combat(self, participant_ids)
         self.bump()
         return combat
@@ -558,7 +607,7 @@ class GameState:
             mon = monsters.spawn_from_entity(ent)
             self.characters[mon.id] = mon
             spawned.append(mon.id)
-        participant_ids = [pid for pid in self.pc_ids if pid in self.characters] + spawned
+        participant_ids = self.active_party_ids() + spawned
         if not spawned or not participant_ids:
             return None
         combat = start_combat(self, participant_ids)
@@ -745,7 +794,7 @@ class GameState:
             merit = default_merit
 
         awarded: list[str] = []
-        for pc in self.pcs():
+        for pc in self.joined_pcs() or self.pcs():
             progression.grant_skill_points(pc, sp)
             guild_rank.award_merit(pc, merit)
             awarded.append(f"{pc.name} +{sp} SP / +{merit} merit")
@@ -764,7 +813,7 @@ class GameState:
         quest = store.update_quest_status(quest_id, "failed")
         if quest is None:
             return None
-        for pc in self.pcs():
+        for pc in self.joined_pcs() or self.pcs():
             pc.standing -= 1
         self.add_event(Event(
             actor_id=actor_id or "system",

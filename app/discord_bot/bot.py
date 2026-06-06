@@ -12,12 +12,13 @@ from discord.ext import commands
 from ..ai import orchestrator, prompts
 from ..config import settings
 from ..content import currency, director, monsters, scenario
+from ..content.characters import premade_pcs
 from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
-from ..engine.types import CostType, IntentTier
+from ..engine.types import Character, CostType, IntentTier
 from ..logging_setup import finish_recording, get_logger, start_recording
-from ..state import campaigns, game_state
+from ..state import campaigns, game_state, player_registry
 from ..world import location_registration, movement as world_movement
 from . import dice_animations, embeds, i18n
 from .views import ChoiceView, RollView
@@ -176,6 +177,35 @@ def _mention_for(gs: game_state.GameState, actor_id: str) -> str | None:
 
 def _display_name(user) -> str:
     return getattr(user, "display_name", None) or getattr(user, "global_name", None) or getattr(user, "name", None) or str(user)
+
+
+def _campaign_opened(gs: game_state.GameState) -> bool:
+    return bool(gs.flags.get("opened"))
+
+
+def _guest_character(gs: game_state.GameState, user_id: str, display_name: str) -> tuple[Character, str]:
+    existing = gs.pc_for_user(user_id)
+    if existing:
+        return existing, "existing"
+    guest_id = f"pc_guest_{user_id}"
+    if guest_id in gs.characters:
+        return gs.characters[guest_id], "guest"
+    templates = premade_pcs()
+    guest_count = sum(1 for pc_id in gs.players.values() if str(pc_id).startswith("pc_guest_"))
+    template = templates[guest_count % len(templates)]
+    pc = template.clone(id=guest_id, name=f"{template.name} ({display_name})")
+    pc.blurb = f"{pc.blurb}\n訪客預設角色。"
+    return pc, "guest"
+
+
+def _join_character_for_user(gs: game_state.GameState, user_id: str, display_name: str) -> tuple[Character, str]:
+    existing = gs.pc_for_user(user_id)
+    if existing:
+        return existing, "existing"
+    registered = player_registry.get_character(user_id)
+    if registered:
+        return registered, "registered"
+    return _guest_character(gs, user_id, display_name)
 
 
 async def _persist(gs: game_state.GameState) -> None:
@@ -616,6 +646,9 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
     gs = _state_for_channel(channel.id)
     if gs is None:
         log.warning("process_action: no active game in channel=%s — dropping", channel.id)
+        return
+    if not _campaign_opened(gs):
+        log.warning("process_action: campaign not opened in channel=%s — dropping", channel.id)
         return
     pc = gs.characters.get(actor_id)
     if pc is None:
@@ -1457,7 +1490,10 @@ async def start(interaction: discord.Interaction):
     gs = game_state.reset_state(channel_id=interaction.channel_id)
     await location_registration.ensure_seed_location_cards(gs, scenario.LOCATIONS)
     await interaction.followup.send(embed=embeds.intro_embed())
-    await interaction.followup.send(embed=embeds.roster_embed(gs), view=_join_view(interaction.channel))
+    await interaction.followup.send(
+        "戰役已建立。玩家請使用 `/join` 加入；至少一人加入後，使用 `/run` 開始第一幕。"
+    )
+    await interaction.followup.send(embed=embeds.roster_embed(gs))
     await _persist(gs)
 
 
@@ -1479,41 +1515,54 @@ def _join_view(channel) -> discord.ui.View:
             await interaction.response.send_message(f"🎭 {interaction.user.mention} 現在是 **{i18n.name(_name)}**！")
             await interaction.message.edit(embed=embeds.roster_embed(gs), view=_join_view(channel))
             await _persist(gs)
-            if len(gs.players) >= 2 and not gs.flags.get("opened"):
-                gs.flags["opened"] = True
-                await _open_current_scene(interaction.channel, gs)
 
         btn.callback = cb
         view.add_item(btn)
     return view
 
 
-@bot.tree.command(description="選擇一名預製角色（bram 或 lyra）。")
-@app_commands.describe(character="要扮演哪位英雄")
-@app_commands.choices(character=[
-    app_commands.Choice(name="Bram Ironwood", value="bram"),
-    app_commands.Choice(name="Lyra Dawnbringer", value="lyra"),
-])
-async def join(interaction: discord.Interaction, character: str):
+@bot.tree.command(description="用你的 Discord 綁定角色卡加入戰役；沒有角色卡時會使用訪客預設角。")
+async def join(interaction: discord.Interaction):
     if not await _ensure_allowed_channel(interaction):
         return
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請先使用 `/start`。", ephemeral=True)
         return
-    target = gs.find_character(character)
-    if target is None or not target.is_pc:
-        names = " / ".join(i18n.name(p.name) for p in gs.pcs())
-        await interaction.response.send_message(f"請選擇其中一位：{names}", ephemeral=True)
+    user_id = str(interaction.user.id)
+    display_name = _display_name(interaction.user)
+    target, source = _join_character_for_user(gs, user_id, display_name)
+    pc = gs.add_player_character(user_id, target, display_name)
+    source_label = {
+        "registered": "你的角色卡",
+        "guest": "訪客預設角色",
+        "existing": "目前角色",
+    }.get(source, "角色卡")
+    await interaction.response.send_message(
+        f"🎭 {interaction.user.mention} 已加入，帶入 **{i18n.name(pc.name)}**（{source_label}）。"
+    )
+    await interaction.followup.send(embed=embeds.roster_embed(gs))
+    await _persist(gs)
+
+
+@bot.tree.command(name="run", description="至少一人加入後，正式開啟目前戰役的第一幕。")
+async def run_campaign(interaction: discord.Interaction):
+    if not await _ensure_allowed_channel(interaction):
         return
-    if gs.claim_pc(str(interaction.user.id), target.id, _display_name(interaction.user)):
-        await interaction.response.send_message(f"🎭 你現在是 **{i18n.name(target.name)}**！")
-        await _persist(gs)
-        if len(gs.players) >= 2 and not gs.flags.get("opened"):
-            gs.flags["opened"] = True
-            await _open_current_scene(interaction.channel, gs)
-    else:
-        await interaction.response.send_message(f"**{i18n.name(target.name)}** 已經被選走了。", ephemeral=True)
+    gs = _state_for_channel(interaction.channel_id)
+    if gs is None:
+        await interaction.response.send_message("這裡目前沒有進行中的遊戲。請先使用 `/start`。", ephemeral=True)
+        return
+    if _campaign_opened(gs):
+        await interaction.response.send_message("戰役已經開始了。", ephemeral=True)
+        return
+    if not gs.joined_pcs():
+        await interaction.response.send_message("至少需要一位玩家先使用 `/join` 加入。", ephemeral=True)
+        return
+    gs.flags["opened"] = True
+    await interaction.response.defer(thinking=True)
+    await interaction.followup.send("▶️ 戰役開始。")
+    await _open_current_scene(interaction.channel, gs)
 
 
 @bot.tree.command(description="宣告你的角色現在要進行的動作。")
@@ -1527,6 +1576,9 @@ async def action(interaction: discord.Interaction, text: str):
     if gs is None:
         log.warning("/action: no active campaign in channel=%s", interaction.channel_id)
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請先使用 `/start`。", ephemeral=True)
+        return
+    if not _campaign_opened(gs):
+        await interaction.response.send_message("戰役尚未開始。至少一位玩家 `/join` 後，使用 `/run` 開始。", ephemeral=True)
         return
     pc = gs.pc_for_user(str(interaction.user.id))
     if pc is None:
@@ -1566,6 +1618,9 @@ async def scene(interaction: discord.Interaction):
         return
     # Generating the recap calls the model (can take a few seconds) — defer so the
     # interaction doesn't time out, then follow up with the live scene.
+    if not _campaign_opened(gs):
+        await interaction.response.send_message("戰役尚未開始。至少一位玩家 `/join` 後，使用 `/run` 開始。", ephemeral=True)
+        return
     await interaction.response.defer()
     prose = await orchestrator.recap_scene(gs)
     await interaction.followup.send(embed=embeds.scene_status_embed(gs, prose))
@@ -1599,6 +1654,9 @@ async def fight(interaction: discord.Interaction):
     gs = _state_for_channel(interaction.channel_id)
     if gs is None:
         await interaction.response.send_message("這裡目前沒有進行中的遊戲。請使用 `/start`。", ephemeral=True)
+        return
+    if not _campaign_opened(gs):
+        await interaction.response.send_message("戰役尚未開始。至少一位玩家 `/join` 後，使用 `/run` 開始。", ephemeral=True)
         return
     if gs.combat and gs.combat.active:
         await interaction.response.send_message("你們已經在戰鬥中了！", ephemeral=True)
@@ -1648,7 +1706,7 @@ async def help(interaction: discord.Interaction):
     e = discord.Embed(title="玩法說明", description=scenario.HOW_TO_PLAY, color=discord.Color.blurple())
     e.add_field(
         name="指令",
-        value="/start ・ /join ・ /action ・ /character ・ /scene ・ /roll ・ /fight ・ /finish ・ /restart",
+        value="/start ・ /join ・ /run ・ /action ・ /character ・ /scene ・ /roll ・ /fight ・ /finish ・ /restart",
         inline=False,
     )
     await interaction.response.send_message(embed=e, ephemeral=True)

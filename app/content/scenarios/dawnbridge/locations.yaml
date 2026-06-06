@@ -12,6 +12,8 @@ locations:
     name: 晨橋邊境
     aliases: [邊境, 這一帶, 周邊地帶]
     loc_type: region
+    x: 0
+    y: 0
     travel_cost: 0
     distances: { east_road: 5, warren: 15 }
     notes: 晨橋村及其周邊的邊境地帶——村莊、東路與哥布林盤踞的山坡都屬此區。
@@ -34,6 +36,9 @@ locations:
     aliases: [鎮上, 村子, 村莊, 晨橋]
     loc_type: settlement
     parent: frontier
+    coord_parent: frontier
+    x: 0
+    y: 0
     travel_cost: 0
     distances: { east_road: 5 }
     connects: [east_road]
@@ -55,6 +60,9 @@ locations:
     aliases: [酒館, 鎏金酒杯, 鎏金酒杯酒館]
     loc_type: venue
     parent: morningbridge
+    coord_parent: morningbridge
+    x: 0
+    y: 0
     travel_cost: 0
     notes: 晨橋村熱鬧的酒館，冒險的起點。
     cost_pool: [relation, attention, time]
@@ -77,6 +85,9 @@ locations:
     aliases: [東邊道路, 大路, 東面道路]
     loc_type: wilds
     parent: frontier
+    coord_parent: frontier
+    x: 5
+    y: 0
     travel_cost: 1
     danger: 0
     distances: { morningbridge: 5, warren: 10 }
@@ -106,6 +117,9 @@ locations:
     aliases: [巢穴, 哥布林窩, 山坡裂隙]
     loc_type: wilds
     parent: frontier
+    coord_parent: frontier
+    x: 15
+    y: 0
     travel_cost: 1
     danger: 3
     distances: { east_road: 10 }

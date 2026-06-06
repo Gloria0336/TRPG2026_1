@@ -160,11 +160,12 @@ Remove-Item logs\app.lock
 
 ### 遊玩（在你的 Discord 頻道中）
 
-1. `/start`：開始冒險並顯示兩名英雄。
-2. 兩位玩家分別點擊 **Play Bram** / **Play Lyra**，或使用 `/join bram` / `/join lyra`。
-3. 兩人都加入後，第一個場景會開啟。使用 `/action` 宣告你要做什麼，例如：`/action 我請 Old Perrin 喝一杯，問他商隊往哪裡去了。`
-4. 需要檢定時，點擊**骰子**按鈕擲骰。
-5. 常用 slash commands：`/character`, `/scene`, `/roll 1d20+3`, `/next`, `/fight`, `/help`。
+1. `/start`：建立戰役等待房。
+2. 玩家使用 `/join` 加入。若玩家已在入口網站建立角色卡，會帶入自己的角色；沒有角色卡時會使用訪客預設角色。
+3. 至少一位玩家加入後，使用 `/run` 開啟第一個場景，不需要等滿兩人。
+4. 開場後使用 `/action` 宣告你要做什麼，例如：`/action 我請 Old Perrin 喝一杯，問他商隊往哪裡去了。`
+5. 需要檢定時，點擊**骰子**按鈕擲骰。
+6. 常用 slash commands：`/join`, `/run`, `/character`, `/scene`, `/roll 1d20+3`, `/fight`, `/help`。
 
 可以在瀏覽器中同時開著儀表板與 Discord，觀看角色 HP、先攻追蹤器與冒險紀錄即時更新。
 

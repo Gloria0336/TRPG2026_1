@@ -26,29 +26,31 @@ def intro_embed() -> discord.Embed:
 
 def roster_embed(state: GameState) -> discord.Embed:
     e = discord.Embed(
-        title="角色介紹與選擇",
+        title="隊伍名單",
         color=BLURPLE,
-        description="冒險需要兩位英雄同行。請閱讀下方介紹，然後點選按鈕或使用 `/join` 選擇一位。",
+        description="玩家使用 `/join` 帶入自己的角色卡；沒有角色卡時會使用訪客預設角。至少一人加入後可用 `/run` 開始。",
     )
-    for pc in state.pcs():
-        taken = pc.id in state.players.values()
-        who = "（已被選走）" if taken else ""
+    party = state.joined_pcs()
+    if not party:
+        e.add_field(name="尚未有玩家加入", value="等待玩家使用 `/join`。", inline=False)
+    for pc in party:
+        claim = state.claim_for_pc(pc.id)
+        who = f" — {claim['display_name']}" if claim else ""
         skills = ", ".join(f"{i18n.skill(s)}({rank})" for s, rank in pc.skill_prof.items()) or "無"
         actions = ", ".join(i18n.action(a.name) for a in pc.actions[:3])
         e.add_field(
             name=f"{i18n.character_label(pc)}（等級 {pc.level}）{who}",
             value=(
                 f"{pc.blurb}\n"
-                f"生命值 {pc.max_hp} ・ 護甲 {pc.ac}\n"
+                f"HP {pc.max_hp} ・ AC {pc.ac}\n"
                 f"公會階級 {pc.guild_rank} ・ SP {pc.skill_points} ・ merit {pc.merit}\n"
-                f"熟練技能：{skills}\n"
-                f"主要動作：{actions}"
+                f"技能：{skills}\n"
+                f"動作：{actions}"
             ),
             inline=False,
         )
-    e.set_footer(text="選好後會綁定你的 Discord 使用者；兩位玩家都選完後，冒險會自動開始。")
+    e.set_footer(text="角色卡會依 Discord ID 綁定；訪客會自動取得一張預設角色。")
     return e
-
 
 
 

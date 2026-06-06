@@ -128,6 +128,24 @@ def _authored_distance(a: str, b: str) -> float | None:
     return None
 
 
+def _coordinate_distance(a: str, b: str) -> float | None:
+    loc_a = store.get_entity_by_id(a)
+    loc_b = store.get_entity_by_id(b)
+    flags_a = (loc_a or {}).get("flags") or {}
+    flags_b = (loc_b or {}).get("flags") or {}
+    parent_a = flags_a.get("coord_parent")
+    parent_b = flags_b.get("coord_parent")
+    if not parent_a or parent_a != parent_b:
+        return None
+    x_a = _float_or_none(flags_a.get("x"))
+    y_a = _float_or_none(flags_a.get("y"))
+    x_b = _float_or_none(flags_b.get("x"))
+    y_b = _float_or_none(flags_b.get("y"))
+    if x_a is None or y_a is None or x_b is None or y_b is None:
+        return None
+    return math.hypot(x_b - x_a, y_b - y_a)
+
+
 def edge_kind(a: str, b: str) -> str:
     loc_a = store.get_entity_by_id(a)
     loc_b = store.get_entity_by_id(b)
@@ -155,7 +173,10 @@ def edge_distance(a: str, b: str) -> float:
     authored = _authored_distance(a, b)
     if edge_kind(a, b) == "containment":
         return authored if authored is not None else CONTAINMENT_DISTANCE_KM
-    return authored if authored is not None else _lateral_default_km(a, b)
+    if authored is not None:
+        return authored
+    coordinate = _coordinate_distance(a, b)
+    return coordinate if coordinate is not None else _lateral_default_km(a, b)
 
 
 def edge_time_hours(a: str, b: str, speed_kmh: float) -> float:

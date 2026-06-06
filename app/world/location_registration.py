@@ -94,6 +94,12 @@ def _request_payload(req: LocationRegistrationRequest) -> dict:
     }
 
 
+def _anchor_id(req: LocationRegistrationRequest) -> str | None:
+    if req.state is None:
+        return None
+    return req.state.current_location_id
+
+
 def _card_from_stored(card: dict) -> LocationCard:
     return LocationCard.model_validate(card)
 
@@ -131,6 +137,9 @@ async def register_location_with_card(
         loc = store.find_location(req.canonical_name or requested)
 
     if loc is not None:
+        loc = store.ensure_location_coordinates(
+            loc["id"], anchor_id=_anchor_id(req), coord_parent=req.parent
+        ) or loc
         existing_card = store.get_location_card(loc["id"])
         if existing_card:
             return loc, _card_from_stored(existing_card)
@@ -156,6 +165,8 @@ async def register_location_with_card(
             aliases=aliases,
             notes=req.authored_notes,
             flags=flags or None,
+            coordinate_anchor_id=_anchor_id(req),
+            coord_parent=req.parent,
         )
     else:
         store.upsert_entity(
@@ -171,6 +182,9 @@ async def register_location_with_card(
             notes=loc.get("notes", ""),
             first_seen_event_id=loc.get("first_seen_event_id"),
         )
+        loc = store.ensure_location_coordinates(
+            loc["id"], anchor_id=_anchor_id(req), coord_parent=req.parent
+        ) or loc
         loc = store.get_entity_by_id(loc["id"]) or loc
 
     canonical = req.canonical_name or loc["name"]

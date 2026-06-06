@@ -708,6 +708,9 @@ def upsert_entity(
     kind = kind if kind in ENTITY_KINDS else "person"
     status = status if status in ENTITY_STATUSES else "present"
     disposition = disposition if disposition in DISPOSITIONS else None
+    if kind == "location":
+        anchor_id = scene_id if scene_id not in (None, LOCATION_SCOPE) else None
+        flags = _ensure_location_coordinate_flags(id, flags or {}, anchor_id=anchor_id)
     now = _now()
     with _lock:
         c = _c()
@@ -854,15 +857,156 @@ def find_location(ref: str) -> dict | None:
     return None
 
 
+_COORD_GRID_KM = 5.0
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_coordinates(flags: dict) -> bool:
+    return _float_or_none(flags.get("x")) is not None and _float_or_none(flags.get("y")) is not None
+
+
+def _coord_key(x: float, y: float) -> tuple[float, float]:
+    return (round(x, 3), round(y, 3))
+
+
+def _coord_parent_of(loc: dict | None) -> str | None:
+    if not loc:
+        return None
+    flags = loc.get("flags") or {}
+    parent = flags.get("coord_parent")
+    if isinstance(parent, str) and parent.strip():
+        return parent
+    return loc.get("id")
+
+
+def _anchor_xy(anchor: dict | None, coord_parent: str | None) -> tuple[float, float]:
+    if not anchor:
+        return 0.0, 0.0
+    flags = anchor.get("flags") or {}
+    if flags.get("coord_parent") != coord_parent:
+        return 0.0, 0.0
+    x = _float_or_none(flags.get("x"))
+    y = _float_or_none(flags.get("y"))
+    if x is None or y is None:
+        return 0.0, 0.0
+    return x, y
+
+
+def _occupied_coordinates(coord_parent: str | None, *, exclude_id: str | None = None) -> set[tuple[float, float]]:
+    occupied: set[tuple[float, float]] = set()
+    for loc in get_locations():
+        if exclude_id and loc.get("id") == exclude_id:
+            continue
+        flags = loc.get("flags") or {}
+        if flags.get("coord_parent") != coord_parent:
+            continue
+        x = _float_or_none(flags.get("x"))
+        y = _float_or_none(flags.get("y"))
+        if x is not None and y is not None:
+            occupied.add(_coord_key(x, y))
+    return occupied
+
+
+def _grid_offsets() -> list[tuple[float, float]]:
+    step = _COORD_GRID_KM
+    offsets = [(0.0, 0.0)]
+    for ring in range(1, 20):
+        d = ring * step
+        offsets.extend([
+            (d, 0.0), (-d, 0.0), (0.0, d), (0.0, -d),
+            (d, d), (d, -d), (-d, d), (-d, -d),
+        ])
+    return offsets
+
+
+def _ensure_location_coordinate_flags(
+    ent_id: str,
+    flags: dict | None,
+    *,
+    anchor_id: str | None = None,
+    coord_parent: str | None = None,
+) -> dict:
+    """Ensure backend-only local coordinates exist on location flags."""
+    saved = dict(flags or {})
+    if _has_coordinates(saved):
+        if coord_parent and not saved.get("coord_parent"):
+            saved["coord_parent"] = coord_parent
+        return saved
+
+    anchor = get_entity_by_id(anchor_id) if anchor_id else None
+    parent = coord_parent or saved.get("coord_parent") or saved.get("parent")
+    if not parent and anchor:
+        parent = _coord_parent_of(anchor)
+    parent = str(parent) if parent else None
+
+    base_x, base_y = _anchor_xy(anchor, parent)
+    occupied = _occupied_coordinates(parent, exclude_id=ent_id)
+    for dx, dy in _grid_offsets():
+        x = base_x + dx
+        y = base_y + dy
+        if _coord_key(x, y) not in occupied:
+            saved["x"] = x
+            saved["y"] = y
+            if parent:
+                saved["coord_parent"] = parent
+            else:
+                saved.pop("coord_parent", None)
+            return saved
+
+    saved["x"] = base_x
+    saved["y"] = base_y
+    if parent:
+        saved["coord_parent"] = parent
+    return saved
+
+
+def ensure_location_coordinates(
+    location_id: str,
+    *,
+    anchor_id: str | None = None,
+    coord_parent: str | None = None,
+) -> dict | None:
+    loc = get_entity_by_id(location_id)
+    if not loc or loc.get("kind") != "location":
+        return None
+    flags = _ensure_location_coordinate_flags(
+        loc["id"], loc.get("flags") or {}, anchor_id=anchor_id, coord_parent=coord_parent
+    )
+    if flags == (loc.get("flags") or {}):
+        return loc
+    upsert_entity(
+        id=loc["id"], scene_id=loc["scene_id"], kind=loc["kind"], name=loc["name"],
+        aliases=loc.get("aliases", []), status=loc["status"],
+        location_id=loc.get("location_id"), disposition=loc.get("disposition"),
+        flags=flags, notes=loc.get("notes", ""),
+        first_seen_event_id=loc.get("first_seen_event_id"),
+    )
+    return get_entity_by_id(location_id)
+
+
 def register_location(name: str, *, location_id: str | None = None,
                       aliases: list[str] | None = None, notes: str = "",
-                      flags: dict | None = None) -> dict:
+                      flags: dict | None = None,
+                      coordinate_anchor_id: str | None = None,
+                      coord_parent: str | None = None) -> dict:
     """Create (or refresh) a global location entity and return it. `flags` may carry
     adjacency: {"connects": [loc_ids], "parent": loc_id} — used to bound travel."""
     ent_id = location_id or f"loc_{uuid.uuid4().hex[:10]}"
+    existing = get_entity_by_id(ent_id)
+    merged_flags = dict((existing or {}).get("flags") or {})
+    merged_flags.update(flags or {})
+    merged_flags = _ensure_location_coordinate_flags(
+        ent_id, merged_flags, anchor_id=coordinate_anchor_id, coord_parent=coord_parent
+    )
     upsert_entity(
         id=ent_id, scene_id=LOCATION_SCOPE, kind="location", name=name.strip(),
-        aliases=aliases or [], status="present", notes=notes, flags=flags or {},
+        aliases=aliases or [], status="present", notes=notes, flags=merged_flags,
     )
     return get_entity_by_id(ent_id)  # type: ignore[return-value]
 
@@ -873,6 +1017,7 @@ _GRAPH_FLAG_KEYS = (
     "loc_type", "parent", "connects", "travel_cost", "danger",
     "required_rank", "gate", "gate_reason", "biome", "controlling_faction",
     "distances", "terrain_modifier", "movement_base", "is_vehicle", "vehicle_type",
+    "x", "y", "coord_parent",
 )
 
 
@@ -882,7 +1027,22 @@ def seed_locations(defs: list[dict]) -> None:
     hierarchical-world-graph fields (loc_type / parent / connects / travel_cost / danger …)
     into flags so pathfinding and the access gate can read them."""
     for d in defs:
-        if d.get("id") and get_entity_by_id(d["id"]):
+        if d.get("id") and (existing := get_entity_by_id(d["id"])):
+            flags = dict(existing.get("flags") or {})
+            for k in _GRAPH_FLAG_KEYS:
+                if d.get(k) is not None and flags.get(k) is None:
+                    value = d[k]
+                    flags[k] = dict(value) if isinstance(value, dict) else list(value) if isinstance(value, list) else value
+            flags = _ensure_location_coordinate_flags(existing["id"], flags)
+            if flags != (existing.get("flags") or {}):
+                upsert_entity(
+                    id=existing["id"], scene_id=existing["scene_id"], kind=existing["kind"],
+                    name=existing["name"], aliases=existing.get("aliases", []),
+                    status=existing["status"], location_id=existing.get("location_id"),
+                    disposition=existing.get("disposition"), flags=flags,
+                    notes=existing.get("notes", ""),
+                    first_seen_event_id=existing.get("first_seen_event_id"),
+                )
             continue
         flags = {k: d[k] for k in _GRAPH_FLAG_KEYS if d.get(k) is not None}
         if isinstance(flags.get("connects"), list):
@@ -1308,6 +1468,14 @@ def apply_delta(scene_id: str | None, delta: dict) -> str | None:
         name = delta.get("register_name") or delta.get("entity_ref")
         if not name:
             return None
+        if delta.get("register_kind") == "location":
+            loc = register_location(
+                name,
+                aliases=delta.get("aliases", []),
+                notes=delta.get("note", ""),
+                coordinate_anchor_id=scene_id,
+            )
+            return loc["id"]
         ent_id = f"ent_{uuid.uuid4().hex[:10]}"
         upsert_entity(
             id=ent_id, scene_id=scene_id, kind=delta["register_kind"], name=name,

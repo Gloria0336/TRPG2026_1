@@ -127,6 +127,52 @@ def test_edge_distance_lateral_honours_authored():
     assert world_movement.edge_distance("east_road", "warren") == pytest.approx(10.0)
 
 
+def test_edge_distance_authored_wins_over_coordinates():
+    store.register_location(
+        "A",
+        location_id="a",
+        flags={"connects": ["b"], "distances": {"b": 12}, "coord_parent": "frame", "x": 0, "y": 0},
+    )
+    store.register_location(
+        "B",
+        location_id="b",
+        flags={"connects": ["a"], "coord_parent": "frame", "x": 3, "y": 4},
+    )
+
+    assert world_movement.edge_distance("a", "b") == pytest.approx(12.0)
+
+
+def test_edge_distance_uses_same_frame_coordinates_when_unauthored():
+    store.register_location(
+        "A",
+        location_id="a",
+        flags={"connects": ["b"], "coord_parent": "frame", "x": 0, "y": 0},
+    )
+    store.register_location(
+        "B",
+        location_id="b",
+        flags={"connects": ["a"], "coord_parent": "frame", "x": 3, "y": 4},
+    )
+
+    assert world_movement.edge_kind("a", "b") == "lateral"
+    assert world_movement.edge_distance("a", "b") == pytest.approx(5.0)
+
+
+def test_edge_distance_ignores_coordinates_across_frames():
+    store.register_location(
+        "A",
+        location_id="a",
+        flags={"connects": ["b"], "loc_type": "wilds", "coord_parent": "frame_a", "x": 0, "y": 0},
+    )
+    store.register_location(
+        "B",
+        location_id="b",
+        flags={"connects": ["a"], "loc_type": "wilds", "coord_parent": "frame_b", "x": 3, "y": 4},
+    )
+
+    assert world_movement.edge_distance("a", "b") == pytest.approx(8.0)
+
+
 def test_lateral_default_when_unauthored():
     store.register_location("Kitchen", location_id="kitchen", flags={"loc_type": "venue"})
     store.register_location("Cellar", location_id="cellar", flags={"loc_type": "venue"})
