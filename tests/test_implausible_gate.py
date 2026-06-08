@@ -28,6 +28,19 @@ def test_to_intent_propagates_implausible():
     assert intent.tier is IntentTier.C
 
 
+def test_impossible_feasibility_derives_implausible():
+    p = IntentParse.model_validate_json(
+        '{"tier":"A","action":"detonate","target":"C4","feasibility":"impossible",'
+        '"implausible":false}'
+    )
+    assert p.feasibility == "impossible"
+    assert p.implausible is True
+
+    intent = orchestrator._to_intent("pc_lyra", "detonate the C4", p)
+    assert intent.feasibility == "impossible"
+    assert intent.implausible is True
+
+
 def test_intent_context_exposes_actor_inventory():
     gs = game_state.reset_state(channel_id=0)
     bram = gs.characters["pc_bram"]

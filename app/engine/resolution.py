@@ -29,10 +29,12 @@ from .types import (
     TRAINED_RANKS,
     normalize_proficiency_rank,
 )
+from ..config import settings
 from ..logging_setup import get_logger
 
 if TYPE_CHECKING:
     from ..ai.schemas import DCAssessment
+    from ..ai.schemas import FictionalPosition
     from ..state.game_state import GameState
 
 log = get_logger("resolution")
@@ -71,6 +73,11 @@ APPROACH_SYNONYMS: dict[str, str] = {
 CONTESTED_SKILLS: frozenset[str] = frozenset({
     "stealth", "deception", "diplomacy", "intimidation", "thievery",
 })
+
+_FEASIBILITY_ENV_TIER: dict[str, int] = {
+    "medium": -1,
+    "low": -2,
+}
 
 
 def _parametric_loyalty_decision(
@@ -305,7 +312,9 @@ def _severity_for_band(band: ResultBand) -> CostSeverity:
     return CostSeverity.MODERATE
 
 
-def pick_cost(state: "GameState", skill: str, band: ResultBand) -> Cost | None:
+def pick_cost(
+    state: "GameState", skill: str, band: ResultBand, prefer: CostType | None = None,
+) -> Cost | None:
     """Pick a structured Cost for a FAILURE / CRIT_FAILURE check (§4.7).
 
     Selection order: scene.cost_pool (if any) → skill default → TIME. Sampling uses
@@ -315,9 +324,11 @@ def pick_cost(state: "GameState", skill: str, band: ResultBand) -> Cost | None:
     if band not in (ResultBand.FAILURE, ResultBand.CRIT_FAILURE):
         return None
 
-    pool = list(getattr(state.scene, "cost_pool", []) or [])
     cost_type: CostType | None = None
-    if pool:
+    if prefer is not None:
+        cost_type = prefer
+    pool = list(getattr(state.scene, "cost_pool", []) or [])
+    if cost_type is None and pool:
         try:
             cost_type = CostType(dice.choice(pool))
         except ValueError:
@@ -375,7 +386,9 @@ _BOON_MAGNITUDE_ZH: dict[BoonMagnitude, str] = {
 }
 
 
-def pick_boon(state: "GameState", skill: str, band: ResultBand) -> Boon | None:
+def pick_boon(
+    state: "GameState", skill: str, band: ResultBand, prefer: BoonType | None = None,
+) -> Boon | None:
     """Pick a structured Boon for a CRIT_SUCCESS check (§4.4 大成功額外效果).
 
     The symmetric inverse of pick_cost. Selection order: scene.boon_pool (if any) →
@@ -385,9 +398,11 @@ def pick_boon(state: "GameState", skill: str, band: ResultBand) -> Boon | None:
     if band is not ResultBand.CRIT_SUCCESS:
         return None
 
-    pool = list(getattr(state.scene, "boon_pool", []) or [])
     boon_type: BoonType | None = None
-    if pool:
+    if prefer is not None:
+        boon_type = prefer
+    pool = list(getattr(state.scene, "boon_pool", []) or [])
+    if boon_type is None and pool:
         try:
             boon_type = BoonType(dice.choice(pool))
         except ValueError:
@@ -645,11 +660,23 @@ def _apply_degree_drop(result: ResolutionResult, note: str, *, target_side: bool
     result.deltas.append(f"{prefix}：{note}")
 
 
+def _position_scaffold_for_band(position: "FictionalPosition | None", band: ResultBand | None) -> str:
+    if position is None or band is None:
+        return ""
+    scaffold = getattr(position, "outcome_scaffold", None) or {}
+    if band is ResultBand.CRIT_SUCCESS:
+        return str(scaffold.get("full") or "").strip()
+    if band is ResultBand.SUCCESS:
+        return str(scaffold.get("partial") or scaffold.get("full") or "").strip()
+    return str(scaffold.get("fail") or "").strip()
+
+
 def resolve(
     state: "GameState",
     intent: Intent,
     *,
     assessment: "DCAssessment | None" = None,
+    position: "FictionalPosition | None" = None,
     helpers: list[str] | None = None,
     env_tier: int = 0,
     tool_bonus: int = 0,
@@ -692,6 +719,11 @@ def resolve(
         advantage = True
     if actor_effect.disadvantage:
         disadvantage = True
+    if position is not None:
+        if getattr(position, "advantage", False):
+            advantage = True
+        if getattr(position, "disadvantage", False):
+            disadvantage = True
     if advantage and disadvantage:
         advantage = disadvantage = False
 
@@ -716,9 +748,16 @@ def resolve(
         state.log_result(result)
         return result
 
+    feasibility_env_tier = 0
+    if settings.intent_decompose_enabled:
+        feasibility_env_tier = _FEASIBILITY_ENV_TIER.get(intent.feasibility, 0)
+    combined_env_tier = env_tier + feasibility_env_tier
+
     external_bonus, external_parts = _compose_external(
-        state, actor, skill, helpers, env_tier, tool_bonus, resource_spend
+        state, actor, skill, helpers, combined_env_tier, tool_bonus, resource_spend
     )
+    if feasibility_env_tier:
+        external_parts.append(f"feasibility {intent.feasibility} {feasibility_env_tier:+d}")
 
     # Actor's +1d4 / -1d4 (bless / guidance / bane). Roll once and fold into the
     # external bonus so it shows up in the dice breakdown alongside assist etc.
@@ -750,6 +789,9 @@ def resolve(
     # of collapsing to "they ask a question".
     if intent.topic:
         result.topic = intent.topic
+    scaffold_hint = _position_scaffold_for_band(position, result.band)
+    if scaffold_hint:
+        result.narration_hint = f"{result.narration_hint}\nCreative scaffold: {scaffold_hint}".strip()
 
     if external_parts:
         result.deltas.append("外部加值：" + "、".join(external_parts))
@@ -779,12 +821,12 @@ def resolve(
     # Recorded into deltas so the dashboard log + future RAG/history layer can read it as
     # plain text without re-parsing JSON.
     if result.band in (ResultBand.FAILURE, ResultBand.CRIT_FAILURE):
-        cost = pick_cost(state, skill, result.band)
+        cost = pick_cost(state, skill, result.band, getattr(position, "cost_hint", None) if position else None)
         if cost is not None:
             result.cost = cost
             result.deltas.append(f"代價：{cost.note}")
     elif result.band is ResultBand.CRIT_SUCCESS:
-        boon = pick_boon(state, skill, result.band)
+        boon = pick_boon(state, skill, result.band, getattr(position, "boon_hint", None) if position else None)
         if boon is not None:
             result.boon = boon
             result.deltas.append(f"增益：{boon.note}")

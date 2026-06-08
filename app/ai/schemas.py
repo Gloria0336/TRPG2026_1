@@ -9,16 +9,18 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..content import quest_taxonomy
 from ..db.store import DISPOSITIONS, ENTITY_KINDS, ENTITY_STATUSES, ITEM_CATEGORIES
 from ..engine import conditions as cond
 from ..engine import rules_5e
+from ..engine.types import BoonType, CostType
 
 # Difficulty bands the parser may pick for the action's *method* (design §4.3 — four-tier,
 # normal = standard DC 10).
 DIFFICULTY_BANDS = ["easy", "normal", "hard", "extreme"]
+FEASIBILITY_LEVELS = ["high", "medium", "low", "impossible"]
 
 # PF2e skills the parser may pick as an `approach`.
 ALLOWED_SKILLS = [
@@ -71,6 +73,10 @@ class IntentParse(BaseModel):
     ] | None = None
     env_modifier: int = 0                    # scene/target offset, clamped to ±ENV_MODIFIER_CAP
     env_reason: str | None = None            # short audit note for the env_modifier
+    goal: str | None = None
+    steps: list[str] = Field(default_factory=list)
+    feasibility: Literal["high", "medium", "low", "impossible"] = "high"
+    side_effects: list[str] = Field(default_factory=list)
     # True when the message relies on a false premise — gear the actor does not carry, or a
     # fact not established in the scene (e.g. "I detonate the C4 I hid earlier"). The bot
     # then gives an in-world redirect instead of an options menu that would legitimise it.
@@ -78,10 +84,19 @@ class IntentParse(BaseModel):
 
     # The model often returns `null` for unused list fields (tier A has no candidates,
     # tier A/B has no options). Coerce nulls to empty lists so validation doesn't fail.
-    @field_validator("candidates", "options", mode="before")
+    @field_validator("candidates", "options", "steps", "side_effects", mode="before")
     @classmethod
     def _none_to_empty(cls, value: object) -> object:
         return [] if value is None else value
+
+    @field_validator("feasibility", mode="before")
+    @classmethod
+    def _valid_feasibility(cls, value: object) -> str:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in FEASIBILITY_LEVELS:
+                return normalized
+        return "high"
 
     @field_validator("env_modifier", mode="before")
     @classmethod
@@ -95,6 +110,12 @@ class IntentParse(BaseModel):
         except (TypeError, ValueError):
             return 0
 
+    @model_validator(mode="after")
+    def _derive_implausible_from_feasibility(self) -> "IntentParse":
+        if self.feasibility == "impossible":
+            self.implausible = True
+        return self
+
     def dc_assessment(self) -> "DCAssessment | None":
         """Compose the auditable DC breakdown, or None when no band was proposed
         (on-table / no-roll actions fall back to the engine's default)."""
@@ -107,6 +128,45 @@ class IntentParse(BaseModel):
 
 
 # ───────────────────────── Entity-state extraction ─────────────────────────
+class FictionalPosition(BaseModel):
+    """Optional creative-action positioning; never carries DCs, dice, or success."""
+
+    advantage: bool = False
+    disadvantage: bool = False
+    cost_hint: CostType | None = None
+    boon_hint: BoonType | None = None
+    outcome_scaffold: dict[str, str] = Field(default_factory=dict)
+    rationale: str | None = None
+
+    @field_validator("cost_hint", mode="before")
+    @classmethod
+    def _valid_cost_hint(cls, value: object) -> object:
+        if value is None or isinstance(value, CostType):
+            return value
+        raw = str(value).strip().lower()
+        return raw if raw in {c.value for c in CostType} else None
+
+    @field_validator("boon_hint", mode="before")
+    @classmethod
+    def _valid_boon_hint(cls, value: object) -> object:
+        if value is None or isinstance(value, BoonType):
+            return value
+        raw = str(value).strip().lower()
+        return raw if raw in {b.value for b in BoonType} else None
+
+    @field_validator("outcome_scaffold", mode="before")
+    @classmethod
+    def _valid_outcome_scaffold(cls, value: object) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        allowed = {"full", "partial", "fail"}
+        return {
+            str(k): str(v).strip()
+            for k, v in value.items()
+            if str(k) in allowed and str(v).strip()
+        }
+
+
 class EntityStateDelta(BaseModel):
     """One narrative-state change the extractor pulls from a narration (design §6.0
     state markers). It NEVER touches numbers/HP/success — only who is where and how.
@@ -330,7 +390,41 @@ class LocationCard(BaseModel):
         return max(0.3, min(2.0, parsed))
 
 
+class AffordanceCard(BaseModel):
+    """Reusable object affordance card cached on entity flags."""
+
+    material: list[str] = Field(default_factory=list)
+    can_be: list[str] = Field(default_factory=list)
+    effects: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+    @field_validator("material", "can_be", "effects", "tags", mode="before")
+    @classmethod
+    def _affordance_lists_none_to_empty(cls, value: object) -> object:
+        return [] if value is None else value
+
+
+class NPCReflection(BaseModel):
+    """One concise NPC impression distilled from recent interaction."""
+
+    reflection: str = ""
+
+    @field_validator("reflection", mode="before")
+    @classmethod
+    def _reflection_text(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()[:240]
+
+
 _KNOWN_CONDITION_IDS = sorted(cond.CATALOG.keys())
+
+
+NPC_REFLECTION_JSON_SHAPE = (
+    '{\n'
+    '  "reflection": "one concise durable impression this NPC now holds about the party/player, or empty string"\n'
+    '}'
+)
 
 
 EXTRACT_JSON_SHAPE = (
@@ -379,7 +473,27 @@ INTENT_JSON_SHAPE = (
     '  "difficulty_band": "easy|normal|hard|extreme" | null,  // how hard the player\'s chosen METHOD is (normal=標準 DC10); null for on-table/no-roll\n'
     '  "env_modifier": integer in -4..+4,             // scene/target difficulty: favourable→negative, hostile→positive\n'
     '  "env_reason": short reason for env_modifier | null,\n'
+    '  "goal": the player\'s underlying objective, separated from the surface method | null,\n'
+    '  "steps": ordered step breakdown for compound actions, or [] for simple actions,\n'
+    f'  "feasibility": one of {FEASIBILITY_LEVELS},\n'
+    '  "side_effects": foreseeable fictional side effects, or [],\n'
     '  "implausible": true if the message relies on gear the actor lacks or a fact not in the scene, else false\n'
+    '}'
+)
+
+
+CREATIVE_POSITION_JSON_SHAPE = (
+    '{\n'
+    '  "advantage": true if the fictional setup clearly helps the actor, else false,\n'
+    '  "disadvantage": true if the fictional setup clearly hinders the actor, else false,\n'
+    f'  "cost_hint": one of {[c.value for c in CostType]} | null,\n'
+    f'  "boon_hint": one of {[b.value for b in BoonType]} | null,\n'
+    '  "outcome_scaffold": {\n'
+    '    "full": narration scaffold for crit/full success, no numbers,\n'
+    '    "partial": narration scaffold for ordinary success or mixed result, no numbers,\n'
+    '    "fail": narration scaffold for failure, no numbers\n'
+    '  },\n'
+    '  "rationale": short audit note, no numbers\n'
     '}'
 )
 
@@ -437,5 +551,15 @@ LOCATION_CARD_JSON_SHAPE = (
     '  "exits_hint": [narrative connections to known paths or directions],\n'
     '  "mood": overall atmosphere,\n'
     '  "terrain_modifier": 1.0  // travel speed multiplier: 1 normal, <1 rough, >1 easy\n'
+    '}'
+)
+
+
+AFFORDANCE_CARD_JSON_SHAPE = (
+    '{\n'
+    '  "material": [material or construction facts, no numbers],\n'
+    '  "can_be": [plausible uses or manipulations],\n'
+    '  "effects": [fictional effects that could matter later],\n'
+    '  "tags": [short lowercase tags such as flammable, fragile, flexible, cover]\n'
     '}'
 )

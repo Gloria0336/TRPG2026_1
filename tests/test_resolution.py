@@ -119,6 +119,32 @@ def test_determine_dc_from_assessment():
     assert resolution.determine_dc(gs, intent, a) == 29
 
 
+def test_resolve_consumes_low_feasibility_without_changing_dc(monkeypatch):
+    from app.ai.schemas import DCAssessment
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "intent_decompose_enabled", True)
+    gs = _fresh()
+    intent = Intent(
+        actor_id="pc_bram",
+        raw_text="spill wine, fake a stumble, and steal the keys",
+        tier=IntentTier.A,
+        action="steal",
+        approach="thievery",
+        target="guard keys",
+        feasibility="low",
+        steps=["spill wine", "fake a stumble", "steal the keys"],
+    )
+    assessment = DCAssessment(base_dc=10, env_modifier=0, final_dc=10)
+
+    res = resolution.resolve(gs, intent, assessment=assessment)
+
+    assert res.dc == 10
+    assert res.dc_base == 10
+    assert res.dc_env_modifier == 0
+    assert any("feasibility low -2" in delta for delta in res.deltas)
+
+
 def test_determine_dc_can_drop_below_ladder_floor():
     from app.ai.schemas import DCAssessment
     gs = _fresh()

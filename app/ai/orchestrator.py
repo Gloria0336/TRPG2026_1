@@ -16,17 +16,21 @@ import time
 import httpx
 
 from ..config import settings
+from ..content import affordances
 from ..engine.resolution import APPROACH_SYNONYMS, normalize_approach, requires_check
 from ..engine.types import Character, Intent, IntentTier, ResolutionResult, ResultKind, SKILLS
 from ..logging_setup import get_logger, truncate
 from ..state.game_state import GameState
 from . import guard, prompts
 from .schemas import (
+    AffordanceCard,
     DCAssessment,
     EntityExtraction,
+    FictionalPosition,
     IntentParse,
     LocationCard,
     NarrationQuestEnvelope,
+    NPCReflection,
     QuestDetails,
     QuestSeed,
 )
@@ -205,9 +209,10 @@ async def interpret(
             log.debug("interpret: extracted JSON: %s", truncate(extracted, 1200))
             parsed = IntentParse.model_validate_json(extracted)
             assessment = parsed.dc_assessment()
-            log.info("interpret: AI parse OK tier=%s action=%s target=%s approach=%s is_attack=%s dc=%s",
+            log.info("interpret: AI parse OK tier=%s action=%s target=%s approach=%s is_attack=%s feasibility=%s steps=%d dc=%s",
                      parsed.tier, parsed.action, parsed.target, parsed.approach,
-                     parsed.is_attack, assessment.final_dc if assessment else None)
+                     parsed.is_attack, parsed.feasibility, len(parsed.steps),
+                     assessment.final_dc if assessment else None)
             intent = _to_intent(actor_id, text, parsed)
             _apply_check_gate(state, intent)
             log.debug("interpret: built Intent=%r", intent)
@@ -270,8 +275,56 @@ def _to_intent(actor_id: str, text: str, p: IntentParse) -> Intent:
         candidates=p.candidates,
         question=p.question,
         options=p.options,
+        goal=p.goal,
+        steps=p.steps,
+        feasibility=p.feasibility,
+        side_effects=p.side_effects,
         implausible=p.implausible,
     )
+
+
+def _should_resolve_creative_position(intent: Intent) -> bool:
+    if not settings.creative_resolver_enabled:
+        return False
+    if intent.tier is not IntentTier.A:
+        return False
+    return intent.feasibility in {"medium", "low"} or len(intent.steps) >= 2
+
+
+async def resolve_creative_position(state: GameState, intent: Intent) -> FictionalPosition | None:
+    """Optional cheap-model fictional positioning for creative Tier-A actions.
+
+    Returns None whenever disabled, offline, untriggered, or malformed. The engine
+    must remain fully functional with position=None.
+    """
+    if not _should_resolve_creative_position(intent):
+        return None
+    if not _ai_enabled():
+        log.info("creative resolver: skipped because AI is offline or unkeyed")
+        return None
+    try:
+        raw = await _chat(
+            settings.model_intent,
+            prompts.CREATIVE_RESOLVER_SYSTEM,
+            prompts.creative_resolver_context(state, intent),
+            json_mode=True,
+            max_tokens=350,
+        )
+        extracted = _extract_json(raw)
+        parsed = FictionalPosition.model_validate_json(extracted)
+        log.info(
+            "creative resolver: OK adv=%s disadv=%s cost=%s boon=%s",
+            parsed.advantage,
+            parsed.disadvantage,
+            parsed.cost_hint.value if parsed.cost_hint else None,
+            parsed.boon_hint.value if parsed.boon_hint else None,
+        )
+        return parsed
+    except httpx.HTTPError as exc:
+        log.warning("creative resolver: transport/HTTP failure (%s: %s) → none", type(exc).__name__, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("creative resolver: failed (%s: %s) → none", type(exc).__name__, exc)
+    return None
 
 
 def _offline_parse(state: GameState, actor: Character, text: str) -> Intent:
@@ -461,6 +514,48 @@ async def build_quest_details(state: GameState, seed: QuestSeed | dict) -> tuple
     return store.fallback_quest_details(seed_data), "details_degraded"
 
 
+def _fallback_affordance_card(request: dict) -> AffordanceCard:
+    name = str(request.get("name") or "").strip()
+    static = affordances.lookup(name)
+    if static:
+        return AffordanceCard.model_validate(static)
+    for alias in request.get("aliases") or []:
+        static = affordances.lookup(str(alias))
+        if static:
+            return AffordanceCard.model_validate(static)
+    return AffordanceCard(
+        material=[],
+        can_be=["inspect", "move if portable", "use as cover if large"],
+        effects=["draw attention", "create opening"],
+        tags=["dynamic", "unknown"],
+    )
+
+
+async def build_affordance_card(request: dict) -> tuple[AffordanceCard, str]:
+    """Build a reusable object affordance card. Always returns a usable fallback."""
+    if _ai_enabled():
+        try:
+            raw = await _chat(
+                settings.model_extract,
+                prompts.AFFORDANCE_CARD_SYSTEM,
+                prompts.affordance_card_context(request),
+                json_mode=True,
+                max_tokens=350,
+            )
+            card = AffordanceCard.model_validate_json(_extract_json(raw))
+            log.info("affordance_card: AI OK name=%s", request.get("name"))
+            return card, "ready"
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "affordance_card: failed (%s: %s) - using fallback",
+                type(exc).__name__,
+                exc,
+            )
+    else:
+        log.info("affordance_card: AI disabled, using fallback")
+    return _fallback_affordance_card(request), "fallback"
+
+
 def _fallback_location_card(request: dict) -> LocationCard:
     name = (
         request.get("canonical_name")
@@ -614,6 +709,47 @@ async def update_rolling_summary(state: GameState) -> str | None:
                     type(exc).__name__, exc)
     except Exception as exc:  # noqa: BLE001 — memory layer must not break play
         log.warning("rolling summary: failed (%s: %s) — keeping old digest",
+                    type(exc).__name__, exc)
+    return None
+
+
+async def update_npc_reflection(state: GameState, entity_ref: str | dict) -> str | None:
+    """Distill one durable NPC impression of the party/player and persist it on flags.
+    Offline / disabled / on any error -> leaves existing reflections untouched."""
+    if not settings.npc_reflection_enabled:
+        return None
+    if not _ai_enabled():
+        return None
+    from ..db import store
+    if isinstance(entity_ref, dict):
+        ent = entity_ref
+    else:
+        ref = str(entity_ref or "").strip()
+        ent = store.get_entity_by_id(ref) if ref else None
+        if ent is None and ref:
+            ent = store.find_by_ref(state.current_location_id, ref)
+    if not ent or ent.get("kind") not in {"person", "creature"}:
+        return None
+    try:
+        raw = await _chat(
+            settings.model_extract,
+            prompts.NPC_REFLECTION_SYSTEM,
+            prompts.npc_reflection_context(state, ent),
+            json_mode=True,
+            max_tokens=220,
+        )
+        parsed = NPCReflection.model_validate_json(_extract_json(raw))
+        reflection = parsed.reflection.strip()
+        if not reflection:
+            return None
+        if store.append_entity_reflection(ent["id"], reflection):
+            log.info("npc reflection updated: entity=%s (%d chars)", ent["id"], len(reflection))
+        return reflection
+    except httpx.HTTPError as exc:
+        log.warning("npc reflection: HTTP failure (%s: %s) - keeping old reflections",
+                    type(exc).__name__, exc)
+    except Exception as exc:  # noqa: BLE001 - memory layer must not break play
+        log.warning("npc reflection: failed (%s: %s) - keeping old reflections",
                     type(exc).__name__, exc)
     return None
 

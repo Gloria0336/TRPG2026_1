@@ -264,7 +264,7 @@ def _summarize(results: list[dict[str, Any]], models: tuple[str, str]) -> dict[s
         key_fields = {
             model: {
                 k: (parsed[model] or {}).get(k)
-                for k in ("tier", "action", "target", "approach", "topic", "needs_check", "is_attack", "implausible")
+                for k in ("tier", "action", "target", "approach", "topic", "needs_check", "is_attack", "goal", "steps", "feasibility", "side_effects", "implausible")
             }
             for model in models
         }
@@ -336,7 +336,7 @@ def _write_markdown(
         parsed = result.get("parsed") or {}
         fields = {
             k: parsed.get(k)
-            for k in ("tier", "action", "target", "approach", "topic", "needs_check", "is_attack", "implausible")
+            for k in ("tier", "action", "target", "approach", "topic", "needs_check", "is_attack", "goal", "steps", "feasibility", "side_effects", "implausible")
             if parsed.get(k) is not None
         }
         field_text = json.dumps(fields, ensure_ascii=False)

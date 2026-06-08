@@ -11,12 +11,12 @@ from discord.ext import commands
 
 from ..ai import orchestrator, prompts
 from ..config import settings
-from ..content import currency, director, monsters, scenario
+from ..content import affordances, currency, director, monsters, scenario
 from ..content.characters import premade_pcs
 from ..db import store
 from ..engine import combat, resolution
 from ..engine.combat import CombatError
-from ..engine.types import Character, CostType, IntentTier
+from ..engine.types import Character, CostType, IntentTier, ResultKind
 from ..logging_setup import finish_recording, get_logger, start_recording
 from ..state import campaigns, game_state, player_registry
 from ..world import location_registration, movement as world_movement
@@ -318,12 +318,54 @@ def _grant_recipient_id(gs: game_state.GameState, ref: str | None, fallback_acto
     return fallback_actor_id if fallback_actor_id in gs.characters else None
 
 
+def _npc_reflection_entity_id(gs: game_state.GameState, ref: str | None) -> str | None:
+    if not ref:
+        return None
+    ent = store.find_by_ref(gs.current_location_id, ref)
+    if ent and ent.get("kind") in {"person", "creature"}:
+        return ent["id"]
+    return None
+
+
+def _note_npc_reflection_delta(entity_ids: set[str], ent_id: str | None, delta: dict) -> None:
+    if not ent_id:
+        return
+    if not (delta.get("disposition") or delta.get("commitment")):
+        return
+    ent = store.get_entity_by_id(ent_id)
+    if ent and ent.get("kind") in {"person", "creature"}:
+        entity_ids.add(ent_id)
+
+
+def _note_result_reflection_target(gs: game_state.GameState, result, entity_ids: set[str]) -> None:
+    if result is None:
+        return
+    kind = getattr(result, "kind", None)
+    kind_value = kind.value if isinstance(kind, ResultKind) else str(kind or "")
+    if kind_value not in {ResultKind.CHECK.value, ResultKind.NARRATIVE.value}:
+        return
+    ent_id = _npc_reflection_entity_id(gs, getattr(result, "target_name", None))
+    if ent_id:
+        entity_ids.add(ent_id)
+
+
+def _npc_reflection_due(gs: game_state.GameState) -> bool:
+    if not settings.npc_reflection_enabled:
+        return False
+    try:
+        every = max(1, int(settings.npc_reflection_every))
+    except (TypeError, ValueError):
+        every = 1
+    return every <= 1 or len(gs.event_log) % every == 0
+
+
 async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) -> None:
     """After each narration: pull entity-state deltas (LLM extraction, offline-safe)
     and apply them, then recompute the dynamic scene summary so the next turn reads
     current presence/state instead of the static blurb."""
     scope = gs.current_location_id
     threshold = settings.mention_promote_threshold
+    reflection_entity_ids: set[str] = set()
     try:
         extraction = await orchestrator.extract_entity_states(gs, prose, result)
         for delta in extraction.actionable():
@@ -353,6 +395,8 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                         )
                     else:
                         ent_id = store.promote_mention(scope, name, kind)
+                        _maybe_schedule_affordance_card(gs, ent_id, getattr(result, "raw_text", "") or prose)
+                        _note_npc_reflection_delta(reflection_entity_ids, ent_id, d)
                     log.info("entity promoted after %d mention(s): scope=%s name=%s kind=%s id=%s",
                              count, scope, name, kind, ent_id)
                 else:
@@ -371,11 +415,14 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                     aliases=d.get("aliases") or [], note=d.get("note") or "",
                 )
                 if ent_id:
+                    _note_npc_reflection_delta(reflection_entity_ids, ent_id, d)
                     log.info("entity auto-registered (narrated hostile, no debounce): "
                              "scope=%s ref=%s kind=%s id=%s", scope, ref, kind, ent_id)
                 continue
             ent_id = store.apply_delta(scope, d)
             if ent_id:
+                _maybe_schedule_affordance_card(gs, ent_id, getattr(result, "raw_text", "") or prose)
+                _note_npc_reflection_delta(reflection_entity_ids, ent_id, d)
                 log.info("entity delta applied: scope=%s entity=%s %s",
                          scope, ent_id, delta.model_dump(exclude_none=True))
         for grant in extraction.acquired_items():
@@ -423,6 +470,15 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
                      scope, extraction.location_note[:80])
     except Exception as exc:  # noqa: BLE001 — continuity layer must not break play
         log.warning("entity update failed (%s): %s", type(exc).__name__, exc)
+    # NPC reflection memory: only significant NPC interactions get distilled, and only at
+    # a conservative cadence. The distiller itself is offline/error-safe.
+    try:
+        _note_result_reflection_target(gs, result, reflection_entity_ids)
+        if _npc_reflection_due(gs):
+            for ent_id in sorted(reflection_entity_ids):
+                await orchestrator.update_npc_reflection(gs, ent_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("npc reflection refresh failed (%s): %s", type(exc).__name__, exc)
     # Rolling scene digest: refresh every `rolling_summary_every` beats so plot that has
     # scrolled out of the event window is still remembered (compose_scene_summary reads
     # current_summary back). Cadence-gated to keep the extra cheap-model call occasional.
@@ -433,6 +489,46 @@ async def _apply_entity_updates(gs: game_state.GameState, prose: str, result) ->
     except Exception as exc:  # noqa: BLE001
         log.warning("rolling summary refresh failed (%s): %s", type(exc).__name__, exc)
     gs.bump()
+
+
+def _maybe_schedule_affordance_card(gs: game_state.GameState, ent_id: str | None, player_text: str = "") -> None:
+    if not settings.affordance_generation_enabled or not ent_id:
+        return
+    ent = store.get_entity_by_id(ent_id)
+    if not ent or ent.get("kind") != "object":
+        return
+    flags = ent.get("flags") or {}
+    if isinstance(flags, dict) and flags.get("affordance"):
+        return
+    if affordances.lookup(str(ent.get("name") or "")):
+        return
+    for alias in ent.get("aliases") or []:
+        if affordances.lookup(str(alias)):
+            return
+
+    async def run() -> None:
+        try:
+            latest = store.get_entity_by_id(ent_id)
+            if not latest or latest.get("kind") != "object":
+                return
+            latest_flags = latest.get("flags") or {}
+            if isinstance(latest_flags, dict) and latest_flags.get("affordance"):
+                return
+            card, state = await orchestrator.build_affordance_card({
+                "name": latest.get("name") or "",
+                "aliases": latest.get("aliases") or [],
+                "current_location": prompts.current_location_label(gs),
+                "notes": latest.get("notes") or "",
+                "player_text": player_text,
+                "scene_context": prompts.compose_scene_summary(gs),
+            })
+            store.merge_entity_flags(ent_id, {"affordance": card.model_dump()})
+            log.info("affordance card cached: entity=%s state=%s", ent_id, state)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("affordance card background task failed entity=%s (%s: %s)",
+                        ent_id, type(exc).__name__, exc)
+
+    asyncio.create_task(run(), name=f"affordance-card-{ent_id}")
 
 
 def _action_from_display(pc, label: str) -> str:
@@ -807,6 +903,8 @@ async def _begin_check(channel, user, gs, pc, intent, assessment) -> None:
 
     # §4.9 helper opt-in: only offered when the OTHER PC is proficient in this skill
     # (an untrained helper grants +0 — UX hides the button to avoid false hope).
+    position = await orchestrator.resolve_creative_position(gs, intent)
+
     helper_user_id: int | None = None
     helper_pc_id: str | None = None
     for other_pc in gs.pcs():
@@ -835,7 +933,7 @@ async def _begin_check(channel, user, gs, pc, intent, assessment) -> None:
 
     async def on_roll(interaction: discord.Interaction):
         log.info("_begin_check.on_roll: pc=%s helpers=%s rolling check", pc.name, view.helpers)
-        result = resolution.resolve(gs, intent, assessment=assessment, helpers=list(view.helpers))
+        result = resolution.resolve(gs, intent, assessment=assessment, position=position, helpers=list(view.helpers))
         await interaction.response.edit_message(content="🎲 擲骰中...", embed=None, view=None)
         await _send_dice_animation(channel, result.natural)
         prose = await _narrate_into_log(gs, result)
