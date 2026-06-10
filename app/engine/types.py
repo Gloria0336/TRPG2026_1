@@ -10,6 +10,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from typing import Literal
 
 
 # ───────────────────────── Abilities & skills (5e) ─────────────────────────
@@ -403,6 +404,10 @@ class Intent:
     candidates: list[str] = field(default_factory=list)  # legacy model hints; not buttons
     question: str | None = None        # tier C: clarifying question
     options: list[str] = field(default_factory=list)     # tier C: option labels
+    goal: str | None = None
+    steps: list[str] = field(default_factory=list)
+    feasibility: Literal["high", "medium", "low", "impossible"] = "high"
+    side_effects: list[str] = field(default_factory=list)
     # True when the message rests on a false premise (gear the actor lacks / a fact not in
     # the scene). The bot redirects in-world instead of resolving or offering a menu.
     implausible: bool = False

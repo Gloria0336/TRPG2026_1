@@ -1600,6 +1600,38 @@ def entity_commitments(entity: dict) -> list[str]:
     return [c for c in (raw or []) if isinstance(c, str)]
 
 
+# ───────────────────────── entity reflections ─────────────────────────
+def append_entity_reflection(entity_id: str, text: str) -> bool:
+    """Record a durable NPC impression of the party/player. Stored on flags like
+    commitments so it is re-injected even after the event window scrolls away."""
+    if not entity_id or not text or not text.strip():
+        return False
+    ent = get_entity_by_id(entity_id)
+    if not ent or ent.get("kind") not in {"person", "creature"}:
+        return False
+    flags = dict(ent.get("flags") or {})
+    existing = [r for r in (flags.get("reflections") or []) if isinstance(r, str)]
+    clean = text.strip()
+    if clean in existing:
+        return False
+    flags["reflections"] = (existing + [clean])[-6:]
+    upsert_entity(
+        id=ent["id"], scene_id=ent["scene_id"], kind=ent["kind"], name=ent["name"],
+        aliases=ent.get("aliases", []), status=ent["status"],
+        location_id=ent.get("location_id"), disposition=ent.get("disposition"),
+        flags=flags, notes=ent.get("notes", ""),
+        first_seen_event_id=ent.get("first_seen_event_id"),
+    )
+    return True
+
+
+def entity_reflections(entity: dict) -> list[str]:
+    """The durable NPC impressions recorded on an entity dict (may be empty)."""
+    flags = entity.get("flags") or {}
+    raw = flags.get("reflections") if isinstance(flags, dict) else None
+    return [r for r in (raw or []) if isinstance(r, str)]
+
+
 # ───────────────────────── scene_state ─────────────────────────
 def set_base_summary(scene_id: str, base_summary: str) -> None:
     with _lock:

@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # When True (and AI is online), each narration is read by model_extract to pull
     # structured entity-state deltas (who left, who turned hostile…). Offline this is
     # skipped and only structured/engine deltas apply.
+    intent_decompose_enabled: bool = True
+    affordances_enabled: bool = True
+    creative_resolver_enabled: bool = False
+    affordance_generation_enabled: bool = False
+    npc_reflection_enabled: bool = False
+    npc_reflection_every: int = 6
     entity_extraction_enabled: bool = True
 
     # Debounce for auto-registering NEW entities the AI mentions in prose: a brand-new

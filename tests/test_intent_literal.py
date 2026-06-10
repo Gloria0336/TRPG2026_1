@@ -110,3 +110,37 @@ def test_intent_json_shape_advertises_topic_slot():
     the model has no schema clue to fill it."""
     assert "topic" in INTENT_JSON_SHAPE
     assert "specific subject" in INTENT_JSON_SHAPE
+
+
+def test_intent_parse_accepts_decomposition_fields():
+    p = IntentParse.model_validate_json(
+        '{"tier":"A","action":"steal","target":"guard keys","approach":"thievery",'
+        '"goal":"get the keys without open violence",'
+        '"steps":["spill wine","fake a stumble","lift the keys"],'
+        '"feasibility":"low","side_effects":["floor becomes slick","guard is distracted"]}'
+    )
+    assert p.goal == "get the keys without open violence"
+    assert p.steps == ["spill wine", "fake a stumble", "lift the keys"]
+    assert p.feasibility == "low"
+    assert p.side_effects == ["floor becomes slick", "guard is distracted"]
+
+
+def test_intent_parse_decomposition_defaults_and_clamps():
+    p = IntentParse.model_validate({
+        "tier": "A",
+        "action": "search",
+        "steps": None,
+        "side_effects": None,
+        "feasibility": "wildly",
+    })
+    assert p.goal is None
+    assert p.steps == []
+    assert p.feasibility == "high"
+    assert p.side_effects == []
+
+
+def test_intent_json_shape_advertises_decomposition_slots():
+    assert "goal" in INTENT_JSON_SHAPE
+    assert "steps" in INTENT_JSON_SHAPE
+    assert "feasibility" in INTENT_JSON_SHAPE
+    assert "side_effects" in INTENT_JSON_SHAPE

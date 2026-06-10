@@ -4,15 +4,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..config import settings
+from ..content import affordances
 from ..db import store
 from ..discord_bot import i18n
 from ..engine import conditions as cond
 from ..logging_setup import truncate
 from .schemas import (
     ALLOWED_SKILLS,
+    AFFORDANCE_CARD_JSON_SHAPE,
+    CREATIVE_POSITION_JSON_SHAPE,
     EXTRACT_JSON_SHAPE,
     INTENT_JSON_SHAPE,
     LOCATION_CARD_JSON_SHAPE,
+    NPC_REFLECTION_JSON_SHAPE,
     QUEST_DETAILS_JSON_SHAPE,
     QUEST_SEED_JSON_SHAPE,
 )
@@ -166,6 +170,66 @@ def _location_card_block(state: "GameState") -> str:
     return "\n".join(lines)
 
 
+def _interactive_affordances_block(state: "GameState", present: list[dict]) -> str:
+    """Structured object affordances the intent parser can reason from."""
+    if not settings.affordances_enabled:
+        return ""
+
+    entries: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+
+    def add(label: str, card: dict | None) -> None:
+        clean = str(label or "").strip()
+        if not clean or not card:
+            return
+        key = affordances.normalize_name(clean)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        entries.append((clean, card))
+
+    for ent in present:
+        if ent.get("kind") != "object":
+            continue
+        flags = ent.get("flags") or {}
+        cached = flags.get("affordance") if isinstance(flags, dict) else None
+        add(str(ent.get("name") or ""), cached if isinstance(cached, dict) else affordances.lookup(str(ent.get("name") or "")))
+        for alias in ent.get("aliases") or []:
+            if len(entries) >= 10:
+                break
+            add(str(alias), affordances.lookup(str(alias)))
+
+    try:
+        card = store.get_location_card(state.current_location_id)
+    except Exception:  # noqa: BLE001
+        card = None
+    for feature in (card or {}).get("interactive_features") or []:
+        if len(entries) >= 10:
+            break
+        add(str(feature), affordances.lookup(str(feature)))
+
+    if not entries:
+        return ""
+
+    lines = ["INTERACTIVE OBJECT AFFORDANCES (static facts; do not decide success/DC):"]
+    for label, card in entries[:10]:
+        effects = [str(e) for e in card.get("effects", [])[:5]]
+        condition_ids: list[str] = []
+        for effect in effects:
+            condition_ids.extend(affordances.effects_to_conditions(effect))
+        condition_ids = list(dict.fromkeys(condition_ids))
+        parts = [
+            f"material={', '.join(str(v) for v in card.get('material', [])[:4]) or 'unknown'}",
+            f"can_be={', '.join(str(v) for v in card.get('can_be', [])[:5]) or 'unknown'}",
+            f"effects={', '.join(effects) or 'none'}",
+            f"tags={', '.join(str(v) for v in card.get('tags', [])[:5]) or 'none'}",
+        ]
+        if condition_ids:
+            parts.append(f"safe_condition_ids={', '.join(condition_ids)}")
+        lines.append(f"- {label}: " + "; ".join(parts))
+    return "\n".join(lines)
+
+
 LOCATION_CARD_SYSTEM = f"""You are a LOCATION REGISTRATION AGENT for a living-world Pathfinder 2e engine.
 
 Your job is to turn a location registration request into stable structured world data.
@@ -208,6 +272,49 @@ def location_card_context(request: dict) -> str:
         "RECENT_EVENTS:\n" + recent_lines,
         "Generate the location card JSON now.",
     ])
+
+
+AFFORDANCE_CARD_SYSTEM = f"""You are an OBJECT AFFORDANCE AGENT for a living-world Pathfinder 2e engine.
+
+Your job is to describe what a newly registered object is made of, how it can plausibly
+be used, and what fictional effects it may create later.
+
+Rules:
+- Do not decide success/failure, DCs, dice, HP, damage, quantities, treasure, or elapsed time.
+- Do not create NPCs, locations, conditions, or mechanics.
+- Use short reusable phrases. Prefer grounded physical properties over plot invention.
+- Keep tags lowercase ASCII where natural.
+- Return ONLY JSON in this exact shape:
+{AFFORDANCE_CARD_JSON_SHAPE}"""
+
+
+def affordance_card_context(request: dict) -> str:
+    aliases = request.get("aliases") or []
+    return "\n".join([
+        f"OBJECT_NAME: {request.get('name', '')}",
+        "ALIASES: " + ", ".join(str(a) for a in aliases),
+        f"CURRENT_LOCATION: {request.get('current_location', '')}",
+        f"NOTES: {request.get('notes') or ''}",
+        f"PLAYER_TEXT: {request.get('player_text') or ''}",
+        "SCENE_CONTEXT:",
+        str(request.get("scene_context") or ""),
+        "Generate the object affordance JSON now.",
+    ])
+
+
+INTENT_DECOMPOSE_INSTRUCTIONS = """COMPOUND ACTION UNDERSTANDING:
+- First infer `goal`: what the player is trying to achieve underneath the surface move.
+- Break compound actions into ordered `steps`. For a simple action, use [].
+- Set `feasibility` to:
+  - high: ordinary and well-supported by the scene.
+  - medium: possible, but needs luck, timing, or social cover.
+  - low: physically possible but awkward, exposed, or badly supported by the current fiction.
+  - impossible: contradicted by inventory, scene entities, or established facts.
+- List `side_effects` as short foreseeable fictional consequences only. Do not invent facts.
+- `feasibility` must NEVER encode DC, dice, success, damage, or numeric modifiers.
+""" if settings.intent_decompose_enabled else """COMPOUND ACTION UNDERSTANDING:
+- Decomposition is disabled. Leave `goal` null, `steps` [], `feasibility` "high", and `side_effects` [] unless the message is truly impossible.
+"""
 
 
 INTENT_SYSTEM = f"""You are the INTENT PARSER for a living_world game run by a \
@@ -257,6 +364,8 @@ approach="diplomacy", topic="內褲顏色"
 or "嗯..." or a one-word noun with no action.
 
 `approach` must be one of these PF2e skills when applicable: {", ".join(ALLOWED_SKILLS)}.
+
+{INTENT_DECOMPOSE_INSTRUCTIONS}
 
 For tier "A", also decide `needs_check`:
 - Set `needs_check` FALSE only for trivial, uncontested, no-risk actions where failure \
@@ -424,6 +533,9 @@ def intent_context(
     card_block = _location_card_block(state)
     if card_block:
         parts.append(card_block)
+    affordance_block = _interactive_affordances_block(state, present)
+    if affordance_block:
+        parts.append(affordance_block)
     brief = _condition_brief(present)
     if brief:
         parts.append(
@@ -445,6 +557,50 @@ def intent_context(
 
 
 # ───────────────────────── Narrator (GM voice) ─────────────────────────
+CREATIVE_RESOLVER_SYSTEM = f"""You are the CREATIVE ACTION POSITIONER for a living-world Pathfinder 2e engine.
+
+Your ONLY job is to inspect a clear Tier-A player intent and produce fictional positioning:
+advantage/disadvantage, cost/boon TYPE hints, and short outcome scaffolds.
+
+Hard rules:
+- Never decide success, failure, DC, dice, HP, damage, quantities, or elapsed time.
+- Never invent new facts; reason only from the structured scene, intent, and object affordances.
+- `cost_hint` and `boon_hint` are type preferences only. The engine still owns severity,
+  magnitude, band, and whether any cost/boon attaches.
+- Use advantage/disadvantage sparingly. If both seem true, set both true; the engine cancels them.
+- Outcome scaffolds must be fictional prompts, not results. No numbers, no dice words, no DCs.
+- Return ONLY JSON in this exact shape:
+{CREATIVE_POSITION_JSON_SHAPE}"""
+
+
+def creative_resolver_context(state: "GameState", intent) -> str:
+    present = [e for e in state.present_entities() if e.get("kind") != "location"]
+    parts = [
+        f"LOCATION: {current_location_label(state)}",
+        compose_scene_summary(state),
+        "PLAYER INTENT:",
+        f"- raw_text: {intent.raw_text}",
+        f"- action: {intent.action}",
+        f"- target: {intent.target}",
+        f"- approach: {intent.approach}",
+        f"- goal: {intent.goal}",
+        f"- steps: {', '.join(intent.steps) if intent.steps else '(none)'}",
+        f"- feasibility: {intent.feasibility}",
+        f"- side_effects: {', '.join(intent.side_effects) if intent.side_effects else '(none)'}",
+        "Remember: do not decide success/failure or any number.",
+    ]
+    card_block = _location_card_block(state)
+    if card_block:
+        parts.append(card_block)
+    affordance_block = _interactive_affordances_block(state, present)
+    if affordance_block:
+        parts.append(affordance_block)
+    recent = state.event_log[-6:] if getattr(state, "event_log", None) else []
+    if recent:
+        parts.append("RECENT EVENTS:\n" + "\n".join(_event_line(e, full=False) for e in recent))
+    return "\n".join(parts)
+
+
 NARRATE_SYSTEM = f"""You are the GAME MASTER narrator for a Pathfinder 2e session. \
 You will be given a STRUCTURED RESULT that the game engine has already computed (dice, \
 hits, damage, band, cost, boon). Your job is to dramatize it in vivid, concise prose.
@@ -510,6 +666,13 @@ def _entities_block(state: "GameState") -> str:
             if commitments:
                 line += "\n  （已立下、必須遵守的承諾／既定事實：" + \
                     "；".join(truncate(c, 60) for c in commitments) + "）"
+            # NPC-level reflections are their durable impression of the party/player.
+            # They are steering context only: use them to keep behaviour consistent,
+            # not as literal exposition.
+            reflections = store.entity_reflections(e)
+            if reflections:
+                line += "\n  （對玩家的既有印象，僅供鋪陳、勿直接說出：" + \
+                    "；".join(truncate(r, 70) for r in reflections[-3:]) + "）"
             present_lines.append(line)
         lines.append("HERE NOW:\n" + "\n".join(present_lines))
     if absent:
@@ -770,6 +933,72 @@ def rolling_summary_context(state: "GameState") -> str:
         "PREVIOUS DIGEST:\n" + (prev or "-（尚無）"),
         f"NEW EVENTS:\n{history}",
         "Return the updated digest now (Traditional Chinese bullets only):",
+    ])
+
+
+# ───────────────────────── NPC reflection memory ─────────────────────────
+NPC_REFLECTION_SYSTEM = f"""You maintain one NPC's private MEMORY in a tabletop RPG.
+You receive that NPC's current state, existing impressions, and recent events. Return ONE
+new durable reflection about what this NPC now believes about the party/player.
+
+RULES:
+- Return ONLY JSON.
+- Write the reflection in Traditional Chinese, one concise sentence.
+- Capture second-order understanding: patterns, trust, fear, respect, suspicion, leverage,
+  or likely future caution. Do not merely restate the last action.
+- Use only the given context. Do not invent secrets, motives, dice, HP, DCs, damage, or
+  numbers.
+- If there is no meaningful new impression, return an empty string.
+
+Respond with this exact shape:
+{NPC_REFLECTION_JSON_SHAPE}"""
+
+
+def _entity_match_terms(entity: dict) -> list[str]:
+    terms = [entity.get("id", ""), entity.get("name", "")]
+    terms += [str(a) for a in (entity.get("aliases") or [])]
+    return [t.strip().lower() for t in terms if isinstance(t, str) and t.strip()]
+
+
+def npc_reflection_context(state: "GameState", entity: dict) -> str:
+    """Feed one NPC's recent relevant beats and existing reflections to the distiller."""
+    terms = _entity_match_terms(entity)
+    recent = state.event_log[-settings.narrate_context_window:] if state.event_log else []
+    relevant = []
+    for e in recent:
+        hay = " ".join([
+            getattr(e, "actor_id", ""),
+            getattr(e, "actor_name", ""),
+            getattr(e, "summary", ""),
+            getattr(e, "narration", ""),
+            str((getattr(e, "data", {}) or {}).get("target_name", "")),
+            str((getattr(e, "data", {}) or {}).get("raw_text", "")),
+        ]).lower()
+        if any(term and term in hay for term in terms):
+            relevant.append(e)
+    if not relevant:
+        relevant = recent[-6:]
+    history = "\n".join(_event_line(e, full=True) for e in relevant[-8:]) or "-（尚無相關事件）"
+    reflections = store.entity_reflections(entity)
+    commitments = store.entity_commitments(entity)
+    flags = entity.get("flags") or {}
+    agenda = flags.get("agenda") if isinstance(flags, dict) else ""
+    return "\n".join([
+        "NPC:",
+        f"- id: {entity.get('id')}",
+        f"- name: {entity.get('name')}",
+        f"- kind: {entity.get('kind')}",
+        f"- disposition: {disposition_label(entity.get('disposition')) or entity.get('disposition') or 'unknown'}",
+        f"- notes: {truncate(entity.get('notes') or '', 180) or '-'}",
+        f"- agenda (private, do not reveal): {truncate(str(agenda), 160) if agenda else '-'}",
+        "EXISTING IMPRESSIONS:\n" + (
+            "\n".join(f"- {truncate(r, 120)}" for r in reflections[-6:]) or "-（尚無）"
+        ),
+        "COMMITMENTS / STANDING FACTS:\n" + (
+            "\n".join(f"- {truncate(c, 120)}" for c in commitments[-6:]) or "-（尚無）"
+        ),
+        f"RECENT EVENTS INVOLVING OR SURROUNDING THIS NPC:\n{history}",
+        "Return the new NPC reflection JSON now.",
     ])
 
 
