@@ -21,7 +21,7 @@ SEED_ITEMS: list[dict] = [
     {
         "id": "item_dagger",
         "name": "匕首",
-        "aliases": ["一把匕首", "dagger"],
+        "aliases": ["一把匕首", "匕首 ×3（投擲備用）", "dagger"],
         "category": "weapon",
         "slot": "main_hand",
         "description": "短刃，可近戰或投擲。",
@@ -130,11 +130,83 @@ SEED_ITEMS: list[dict] = [
         "stackable": False,
         "source": "seed",
     },
+    {
+        "id": "item_forbidden_dagger",
+        "name": "禁忌匕首",
+        "aliases": ["禁忌匕首（主要武器）", "+1 精製匕首（主要武器）", "+1 精製匕首", "精製匕首", "forbidden dagger"],
+        "category": "weapon",
+        "slot": "main_hand",
+        "description": "Vael Ashcroft 的專屬武器；帶有 +1 加值的精製匕首。",
+        "metadata": {"projection_name": "禁忌匕首（主要武器）", "owner_actor_id": "pc_vael"},
+        "stackable": False,
+        "source": "seed",
+    },
+    {
+        "id": "item_fine_thieves_tools",
+        "name": "精製盜賊工具",
+        "aliases": ["thieves' tools", "fine thieves' tools"],
+        "category": "gear",
+        "slot": None,
+        "description": "精密鎖具、探針與細刃組成的盜賊工具組。",
+        "stackable": False,
+        "source": "seed",
+    },
+    {
+        "id": "item_slumber_toxin",
+        "name": "昏睡毒素",
+        "aliases": ["昏睡毒素 ×2", "sleep toxin", "slumber toxin"],
+        "category": "consumable",
+        "slot": None,
+        "description": "能使目標昏沉入睡的毒素，通常塗抹於刃上或混入飲食。",
+        "stackable": True,
+        "source": "seed",
+    },
+    {
+        "id": "item_noble_signet",
+        "name": "貴族紋徽",
+        "aliases": ["貴族紋徽（真品，偶爾用於偽造身份）", "noble signet"],
+        "category": "key_item",
+        "slot": "trinket",
+        "description": "真品貴族紋徽，可用於證明身分，也偶爾被 Vael 用來偽造更方便的身分。",
+        "metadata": {"projection_name": "貴族紋徽（真品，偶爾用於偽造身份）"},
+        "stackable": False,
+        "source": "seed",
+    },
+    {
+        "id": "item_forbidden_notebook",
+        "name": "禁忌手記",
+        "aliases": ["禁忌手記（半完成的古代魔法研究筆記，以龍語書寫）", "forbidden notebook"],
+        "category": "key_item",
+        "slot": None,
+        "description": "半完成的古代魔法研究筆記，以龍語書寫，內容觸及不宜公開的禁忌知識。",
+        "metadata": {"projection_name": "禁忌手記（半完成的古代魔法研究筆記，以龍語書寫）"},
+        "stackable": False,
+        "source": "seed",
+    },
+    {
+        "id": "item_plain_commoner_clothes",
+        "name": "替換用平民衣物",
+        "aliases": ["plain commoner clothes", "commoner clothes"],
+        "category": "gear",
+        "slot": None,
+        "description": "一套不顯眼的平民衣物，適合偽裝、潛入或擺脫追蹤時替換。",
+        "stackable": False,
+        "source": "seed",
+    },
 ]
 
 
 _LEADING_FILLERS = ("一把", "一件", "一瓶", "一捆", "一些", "少量", "數支")
 _QTY_RE = re.compile(r"(?:[xX×*]\s*\d+|\d+\s*(?:個|把|件|瓶|支|枚|公尺|米)?)$")
+_EXPLICIT_QTY_RE = re.compile(r"[xX×*]\s*(\d+)")
+
+
+def quantity_from_text(name: str) -> int:
+    """Extract explicit quantities like x3 or ×2 from legacy inventory text."""
+    match = _EXPLICIT_QTY_RE.search(name or "")
+    if not match:
+        return 1
+    return max(1, int(match.group(1)))
 
 
 def normalize_name(name: str) -> str:
@@ -164,7 +236,9 @@ def parse_freetext(line: str) -> dict | None:
     for item in SEED_ITEMS:
         names = [item["name"], *(item.get("aliases") or [])]
         if any(norm == normalize_name(name) for name in names):
-            return dict(item)
+            parsed = dict(item)
+            parsed["quantity"] = quantity_from_text(raw)
+            return parsed
     return {
         "name": raw,
         "aliases": [],
@@ -173,4 +247,5 @@ def parse_freetext(line: str) -> dict | None:
         "description": "",
         "stackable": True,
         "source": "dynamic",
+        "quantity": quantity_from_text(raw),
     }

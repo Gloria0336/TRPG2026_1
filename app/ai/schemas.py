@@ -59,7 +59,7 @@ class IntentParse(BaseModel):
     # requires_check) can override false → true so player narration can never talk its
     # way past a contested/risky check (design §8.3 anti-talk protection).
     needs_check: bool = True
-    candidates: list[str] = Field(default_factory=list)   # tier B: 2-4 candidate methods
+    candidates: list[str] = Field(default_factory=list)   # legacy/off-spec hints; not buttons
     question: str | None = None              # tier C: one clarifying question
     options: list[str] = Field(default_factory=list)      # tier C: option labels
     # DC = base (action-method difficulty band) + env_modifier (scene/target difficulty).
@@ -366,14 +366,14 @@ EXTRACT_JSON_SHAPE = (
 # JSON schema string embedded in the prompt to steer the model.
 INTENT_JSON_SHAPE = (
     '{\n'
-    '  "tier": "A" | "B" | "C",\n'
+    '  "tier": "A" | "C",\n'
     '  "action": short verb like "persuade" | "search" | "attack" | null,\n'
     '  "target": who/what is targeted, or null,\n'
     '  "approach": one PF2e skill from the allowed list, or null,\n'
     '  "topic": the specific subject of the action when the player named one (e.g. "內褲顏色", "商隊去向", "他的名字"), or null,\n'
     '  "is_attack": true if the player is trying to attack/fight, else false,\n'
     '  "needs_check": false ONLY for a trivial, uncontested, no-risk action; else true,\n'
-    '  "candidates": [2-4 concrete method options]   // tier B only,\n'
+    '  "candidates": [],                             // retired; always return []\n'
     '  "question": one short clarifying question | null  // tier C only,\n'
     '  "options": [2-4 option labels]                 // tier C only,\n'
     '  "difficulty_band": "easy|normal|hard|extreme" | null,  // how hard the player\'s chosen METHOD is (normal=標準 DC10); null for on-table/no-roll\n'

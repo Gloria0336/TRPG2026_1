@@ -1,0 +1,107 @@
+# Location-first scenario template.
+# Locations are the world graph and are projected into runtime scenes by scenario.py.
+schema_version: 1
+
+locations:
+  - id: region
+    name: 範例區域
+    aliases: [這一帶, 周邊地區]
+    loc_type: region
+    x: 0
+    y: 0
+    travel_cost: 0
+    notes: 這裡寫區域層級的簡短 GM 真相。
+    card:
+      base_summary: >
+        這裡寫區域的基礎描述。它會成為 AI 敘事的穩定背景，不應包含會立刻改變的臨時狀態。
+      sensory_anchors: [聲音線索, 氣味線索, 觸感或氣候線索]
+      visual_landmarks: [地標一, 地標二]
+      interactive_features: [可互動物件或場所]
+      discoverables: [可透過調查得知的資訊]
+      hazards: []
+      soft_hooks: [可前往起始地點, 可詢問當地人]
+      exits_hint: [起始地點]
+      mood: 中性、待改寫
+      terrain_modifier: 1.0
+
+  - id: start
+    name: 起始地點
+    aliases: [起點, 目前地點]
+    loc_type: venue
+    parent: region
+    coord_parent: region
+    x: 0
+    y: 0
+    travel_cost: 0
+    connects: [road]
+    notes: 新遊戲開始時隊伍所在的地點。
+    cost_pool: [relation, attention, time]
+    card:
+      base_summary: >
+        這裡寫第一幕所在地的基礎描述。包含眼前可見的人、物、壓力來源和可行動方向。
+      sensory_anchors: [環境聲, 空氣中的氣味, 人群或空間氛圍]
+      visual_landmarks: [主要地標, 出入口]
+      interactive_features: [可交談的人, 可調查的物件]
+      discoverables: [第一個線索, 第二個線索]
+      hazards: []
+      soft_hooks: [可與範例 NPC 交談, 可調查範例物件, 可前往道路]
+      exits_hint: [道路]
+      mood: 緊張、待改寫
+      terrain_modifier: 1.0
+
+  - id: road
+    name: 道路
+    aliases: [路, 外面的路]
+    loc_type: road
+    parent: region
+    coord_parent: region
+    x: 5
+    y: 0
+    travel_cost: 1
+    danger: 1
+    connects: [start, danger_site]
+    distances: { start: 5, danger_site: 10 }
+    notes: 連接起始地點與危險地點的路線。
+    cost_pool: [time, trace, resource]
+    card:
+      base_summary: >
+        這裡寫移動路線的基礎描述。放入可追蹤、可繞路、可遭遇阻礙的元素。
+      sensory_anchors: [風聲, 遠處動靜, 路面質感]
+      visual_landmarks: [路標, 痕跡, 遠方輪廓]
+      interactive_features: [可搜索的痕跡, 可避開的障礙]
+      discoverables: [通往危險地點的線索]
+      hazards: [可選的環境危險]
+      soft_hooks: [可追蹤線索, 可返回起始地點, 可前往危險地點]
+      exits_hint: [起始地點, 危險地點]
+      mood: 警戒、待改寫
+      terrain_modifier: 0.9
+
+  - id: danger_site
+    name: 危險地點
+    aliases: [目的地, 危險處]
+    loc_type: dungeon
+    parent: region
+    coord_parent: region
+    x: 15
+    y: 0
+    travel_cost: 1
+    danger: 3
+    connects: [road]
+    distances: { road: 10 }
+    notes: 主要衝突或危機所在。
+    cost_pool: [exposure, attention, relation]
+    # Optional. Keys must exist in app/content/monsters.py::_TEMPLATES.
+    # encounter:
+    #   - [goblin, 2]
+    card:
+      base_summary: >
+        這裡寫主要危險地點的基礎描述。包含對手、目標、障礙或倒數危機。
+      sensory_anchors: [壓迫性的聲音, 異常氣味, 危險徵兆]
+      visual_landmarks: [入口, 主要場景, 掩體或高處]
+      interactive_features: [可談判對象, 可破壞/利用的環境]
+      discoverables: [核心真相, 對手弱點, 可救援或可取得的目標]
+      hazards: [主要威脅]
+      soft_hooks: [可交涉, 可潛行, 可正面衝突]
+      exits_hint: [道路]
+      mood: 危險、待改寫
+      terrain_modifier: 0.7

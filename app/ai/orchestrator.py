@@ -308,9 +308,9 @@ def _offline_parse(state: GameState, actor: Character, text: str) -> Intent:
 
     if len(tokens) >= 2:
         return Intent(
-            actor_id=actor.id, raw_text=text, tier=IntentTier.B, target=target,
-            candidates=["investigate it (Investigation)", "look closer (Perception)",
-                        "talk it out (Persuasion)", "force the issue (Athletics)"],
+            actor_id=actor.id, raw_text=text, tier=IntentTier.C, target=target,
+            question="What would you like to do?",
+            options=["Look around", "Talk to someone", "Examine something", "Move on"],
         )
     return Intent(
         actor_id=actor.id, raw_text=text, tier=IntentTier.C,

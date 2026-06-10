@@ -400,7 +400,7 @@ class Intent:
     # resolved without a roll. The engine gate (resolution.requires_check) is the final
     # arbiter and may force this back to True (design §8.3).
     needs_check: bool = True
-    candidates: list[str] = field(default_factory=list)  # tier B: candidate approaches
+    candidates: list[str] = field(default_factory=list)  # legacy model hints; not buttons
     question: str | None = None        # tier C: clarifying question
     options: list[str] = field(default_factory=list)     # tier C: option labels
     # True when the message rests on a false premise (gear the actor lacks / a fact not in

@@ -1,0 +1,35 @@
+# Durable entity template.
+# Use `location` to anchor each entity to a location id from locations.yaml.
+schema_version: 1
+
+entities:
+  - id: ent_example_npc
+    location: start
+    kind: person
+    name: 範例 NPC
+    aliases: [NPC, 委託人, 當事人]
+    status: present
+    disposition: friendly
+    notes: 這裡寫 NPC 的穩定真相、目標或已知情報。
+    flags:
+      agenda: 這裡寫只給 GM/AI 參考的動機，不要直接向玩家攤開。
+      movement_base: 4
+
+  - id: obj_example_clue
+    location: start
+    kind: object
+    name: 範例線索
+    aliases: [線索, 可疑物]
+    status: present
+    notes: 這裡寫物件的可見狀態與可調查資訊。
+
+  - id: ent_example_threat
+    location: danger_site
+    kind: creature
+    name: 範例威脅
+    aliases: [威脅, 敵人]
+    status: present
+    disposition: hostile
+    # Optional authoring note. Active encounter rosters should be placed on locations.yaml.
+    # statblock: goblin
+    notes: 這裡寫威脅的行為、目的、弱點或談判籌碼。

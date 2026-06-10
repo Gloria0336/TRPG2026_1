@@ -703,28 +703,14 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
         await _send_implausible_redirect(channel, user, gs, pc, intent)
         return
 
-    if intent.tier is IntentTier.B and intent.candidates:
-        # B tier (clear goal, unclear method) still uses ChoiceView — these are
-        # concrete method options the engine has narrowed down, not a GM follow-up.
-        gs.clear_clarification(pc.id)  # converged enough to enumerate methods
-        label_map = {i18n.text(x): x for x in intent.candidates}
-        labels = list(label_map)
-
-        async def on_choice(interaction: discord.Interaction, label: str):
-            await interaction.response.edit_message(content=f"➡️ {i18n.name(pc.name)}：**{label}**", view=None)
-            await process_action(channel, user, actor_id, label_map.get(label, label), continue_pending=True)
-
-        if not in_combat:
-            gs.begin_freeplay_action(pc.id)
-            await _persist(gs)
-        await channel.send(content=f"🤔 {user.mention}，你想怎麼做？", view=ChoiceView(user.id, labels, on_choice))
-        return
-
-    if intent.tier is IntentTier.C:
+    if intent.tier in (IntentTier.B, IntentTier.C):
         # GM follow-up flow: post the parser's narrative question and lock the
         # actor's turn. The player's NEXT /action will be treated as a free-form
         # reply (continue_pending=True is set above when a thread is open) and
         # re-interpreted with the growing CLARIFICATION HISTORY in the prompt.
+        # Tier B is retired, but this branch keeps old/off-spec model replies safe:
+        # a partial intent becomes clarification history, never a button-driven
+        # reparse that can drop the player's original goal.
         #
         # Convergence cap: if we've already exchanged MAX_CLARIFICATION_TURNS
         # rounds without escaping tier C, give up — narrate a no-roll beat so
@@ -737,12 +723,15 @@ async def process_action(channel, user, actor_id: str, text: str, continue_pendi
             await _begin_narrative(channel, user, gs, pc, intent)
             return
 
-        question = i18n.text(intent.question) if intent.question else (
-            "（請描述你想做的事，可以直接打字回覆，例如「我抓住他的衣領」）"
-        )
+        if intent.question:
+            question = i18n.text(intent.question)
+        elif intent.target:
+            question = f"你想怎麼處理「{i18n.text(intent.target)}」？請把做法說清楚。"
+        else:
+            question = "（請描述你想做的事，可以直接打字回覆，例如「我抓住他的衣領」）"
         # Optional hints — show as plain text under the question, NOT as buttons,
         # so the player still types their own answer.
-        hints = intent.options or []
+        hints = intent.options or intent.candidates or []
         hint_line = ""
         if hints:
             hint_line = "\n💡 例如：" + "、".join(i18n.text(o) for o in hints[:3])

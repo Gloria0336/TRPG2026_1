@@ -47,10 +47,10 @@ async def test_offline_intent_skill():
     assert intent.tier is IntentTier.A
 
 
-async def test_offline_intent_vague_is_b_or_c():
+async def test_offline_intent_vague_is_c():
     gs = _fresh()
     intent, _ = await orchestrator.interpret(gs, "pc_bram", "hmm uncertain stuff")
-    assert intent.tier in (IntentTier.B, IntentTier.C)
+    assert intent.tier is IntentTier.C
 
 
 async def test_narration_does_not_mutate_numbers():
@@ -95,16 +95,8 @@ def test_i18n_does_not_replace_word_fragments():
     assert "Percepti目標" not in translated
 
 
-async def test_offline_choice_options_display_in_chinese():
+async def test_offline_clarification_options_display_in_chinese():
     gs = _fresh()
-    intent_b, _ = await orchestrator.interpret(gs, "pc_bram", "hmm uncertain stuff")
-    labels_b = [i18n.text(x) for x in intent_b.candidates]
-
-    assert "調查這件事 (調查)" in labels_b
-    assert "仔細觀察 (察覺)" in labels_b
-    assert all("investigate it" not in label for label in labels_b)
-    assert all("Perception" not in label for label in labels_b)
-
     intent_c, _ = await orchestrator.interpret(gs, "pc_bram", "hmm")
     question = i18n.text(intent_c.question)
     labels_c = [i18n.text(x) for x in intent_c.options]
@@ -115,7 +107,8 @@ async def test_offline_choice_options_display_in_chinese():
 
 def test_intent_prompt_requires_chinese_player_facing_options():
     assert "Traditional Chinese" in prompts.INTENT_SYSTEM
-    assert "`question`, `candidates`, and `options`" in prompts.INTENT_SYSTEM
+    assert "`question` and `options`" in prompts.INTENT_SYSTEM
+    assert 'do NOT return "B"' in prompts.INTENT_SYSTEM
 
 
 def test_dc_assessment_composes_band_and_env():

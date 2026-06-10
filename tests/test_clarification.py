@@ -116,3 +116,4 @@ def test_intent_system_prompt_describes_gm_follow_up_style():
     assert "natural-language" in sys.lower() or "narrative voice" in sys.lower()
     # Options must be marked OPTIONAL, not the only output channel.
     assert "OPTIONAL" in sys or "optional" in sys
+    assert 'do NOT return "B"' in sys

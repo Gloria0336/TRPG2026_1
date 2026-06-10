@@ -1,0 +1,25 @@
+# Copy this folder to app/content/scenarios/<new_scenario_id>/ and edit the values.
+# Then set SCENARIO=<new_scenario_id> in .env.
+schema_version: 1
+id: _template
+
+title: 範例劇本標題
+intro: |
+  **範例劇本標題**
+
+  在這裡寫給玩家看的開場介紹。保持簡短，說清楚目前地點、當下張力、
+  以及玩家能立刻採取行動的方向。
+how_to_play: |
+  使用 `/start` 開始遊戲，使用 `/join` 加入角色，使用 `/action` 宣告行動。
+  可用 `/scene` 查看目前情況，或用 `/character` 查看角色卡。
+
+# Must match one locations[].id in locations.yaml.
+start_location: start
+
+# Fallback cost pool for locations without their own cost_pool.
+# Allowed values: time, exposure, resource, trace, attention, relation, debt.
+default_cost_pool: [time, attention, resource]
+
+endings:
+  defeat: >
+    隊伍敗下陣來，當前危機暫時吞沒了他們的計畫。這段冒險在此告一段落。
